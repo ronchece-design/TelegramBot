@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -23,21 +25,33 @@ namespace TelegramBot
 
     public class UserState
     {
+        public long ChatId { get; set; }
         public string Language { get; set; } = "ru";
         public RegistrationStep Step { get; set; } = RegistrationStep.None;
         public string FullName { get; set; } = "";
         public string PhoneNumber { get; set; } = "";
-        public string TeamName { get; set; } = "";
+        public string TeamId { get; set; } = "";
+        public string PendingTeamId { get; set; } = ""; // Запоминаем команду при переходе по ссылке
+        public bool IsLeader { get; set; } = false;
+    }
+
+    public class TeamModel
+    {
+        public string TeamId { get; set; } = "";
+        public string Name { get; set; } = "";
+        public long LeaderChatId { get; set; }
+        public List<long> Members { get; set; } = new();
     }
 
     class Program
     {
         private static readonly ConcurrentDictionary<long, UserState> Users = new();
+        private static readonly ConcurrentDictionary<string, TeamModel> Teams = new(StringComparer.OrdinalIgnoreCase);
         
         // Твой личный Chat ID для уведомлений
         private static readonly long AdminChatId = 8791726949; 
 
-        // Единственный Telegram-канал для обязательной проверки подписки
+        // Канал для обязательной проверки подписки
         private static readonly string RequiredChannel = "@ekologlar_kr";
 
         static async Task Main(string[] args)
@@ -93,11 +107,11 @@ namespace TelegramBot
 
         private static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
         {
-            // Проверка нажатия на кнопку проверки подписки
+            // Проверка кнопки "Проверить подписку"
             if (update.CallbackQuery is { } callbackQuery)
             {
                 long chatId = callbackQuery.Message!.Chat.Id;
-                var user = Users.GetOrAdd(chatId, _ => new UserState());
+                var user = Users.GetOrAdd(chatId, _ => new UserState { ChatId = chatId });
 
                 if (callbackQuery.Data == "check_subscription")
                 {
@@ -112,21 +126,24 @@ namespace TelegramBot
                     }
                     catch
                     {
-                        isSubscribed = true; // Если бот не админ в канале, пропускаем
+                        isSubscribed = true; // Если бот не админ, пропускаем
                     }
 
                     if (isSubscribed)
                     {
                         await botClient.AnswerCallbackQuery(callbackQuery.Id, user.Language switch
                         {
+                            "qr" => "✅ Agza bolg'anlig'in'iz tastıyklandı!",
                             "uz" => "✅ Obuna tasdiqlandi!",
                             "en" => "✅ Subscription confirmed!",
                             _ => "✅ Подписка подтверждена!"
                         }, cancellationToken: cancellationToken);
 
+                        // Переходим к вводу имени
                         user.Step = RegistrationStep.AwaitingName;
                         string prompt = user.Language switch
                         {
+                            "qr" => "Atıńız ha'm familiyańızdı kiritiń (mısalı: Ivan Ivanov):",
                             "uz" => "Исм ва фамилиянгизни киритинг (масалан: Иван Иванов):",
                             "en" => "Please enter your Name and Surname (e.g. John Doe):",
                             _ => "Введите ваше Имя и Фамилию (например: Иван Иванов):"
@@ -137,6 +154,7 @@ namespace TelegramBot
                     {
                         await botClient.AnswerCallbackQuery(callbackQuery.Id, user.Language switch
                         {
+                            "qr" => "❌ Iltimos, aldın kanalǵa agza bolıń!",
                             "uz" => "❌ Iltimos, avval kanalga obuna bo'ling!",
                             "en" => "❌ Please subscribe to the channel first!",
                             _ => "❌ Пожалуйста, подпишитесь на канал!"
@@ -150,19 +168,37 @@ namespace TelegramBot
                 return;
 
             long chatIdMsg = message.Chat.Id;
-            var userState = Users.GetOrAdd(chatIdMsg, _ => new UserState());
+            var userState = Users.GetOrAdd(chatIdMsg, _ => new UserState { ChatId = chatIdMsg });
 
-            if (messageText == "/start" || messageText == "🌐 Выбрать язык / Tilingizni tanlang / Choose language")
+            // Обработка /start с аргументами ссылки (напр. /start team_123)
+            if (messageText.StartsWith("/start"))
+            {
+                userState.Step = RegistrationStep.None;
+                var parts = messageText.Split(' ');
+                if (parts.Length > 1 && parts[1].StartsWith("team_"))
+                {
+                    string targetTeamId = parts[1].Replace("team_", "");
+                    if (Teams.ContainsKey(targetTeamId))
+                    {
+                        userState.PendingTeamId = targetTeamId;
+                    }
+                }
+                await SendLanguageMenu(botClient, chatIdMsg, cancellationToken);
+                return;
+            }
+
+            if (messageText == "🌐 Выбрать язык / Tilingizni tanlang / Choose language")
             {
                 userState.Step = RegistrationStep.None;
                 await SendLanguageMenu(botClient, chatIdMsg, cancellationToken);
                 return;
             }
 
-            if (messageText is "Русский 🇷🇺" or "O'zbekcha 🇺🇿" or "English 🇬🇧")
+            if (messageText is "Русский 🇷🇺" or "O'zbekcha 🇺🇿" or "English 🇬🇧" or "Qaraqalpaq tili 🇺🇿")
             {
                 userState.Language = messageText switch
                 {
+                    "Qaraqalpaq tili 🇺🇿" => "qr",
                     "O'zbekcha 🇺🇿" => "uz",
                     "English 🇬🇧" => "en",
                     _ => "ru"
@@ -172,16 +208,37 @@ namespace TelegramBot
                 return;
             }
 
-            if (messageText is "Регистрация" or "Ro'yxatdan o'tish" or "Registration")
+            if (messageText is "➕ Создать команду" or "➕ Komanda dözetip" or "➕ Jamoa yaratish" or "➕ Create Team")
             {
+                if (!string.IsNullOrEmpty(userState.TeamId))
+                {
+                    string alreadyInTeam = userState.Language switch
+                    {
+                        "qr" => "Siz aldın-ala komandag'a a'zo bolg'ansız!",
+                        "uz" => "Siz allaqachon jamoaga a'zosiz!",
+                        "en" => "You are already in a team!",
+                        _ => "Вы уже состоите в команде!"
+                    };
+                    await botClient.SendMessage(chatIdMsg, alreadyInTeam, cancellationToken: cancellationToken);
+                    return;
+                }
+
+                userState.IsLeader = true;
                 await SendSubscriptionPrompt(botClient, chatIdMsg, userState, cancellationToken);
                 return;
             }
 
-            if (messageText is "Помощь" or "Yordam" or "Help")
+            if (messageText is "👥 Моя команда" or "👥 Mening jamoam" or "👥 My Team" or "👥 Benim komandam")
+            {
+                await ShowMyTeamInfo(botClient, chatIdMsg, userState, cancellationToken);
+                return;
+            }
+
+            if (messageText is "Помощь" or "Yordam" or "Help" or "Anıqlama")
             {
                 string helpText = userState.Language switch
                 {
+                    "qr" => "📞 Anıqlama:\nTelefon: +998 90 379 29 39\nTelegram: @ronchece",
                     "uz" => "📞 Yordam:\nTelefon: +998 90 379 29 39\nTelegram: @ronchece",
                     "en" => "📞 Help:\nPhone: +998 90 379 29 39\nTelegram: @ronchece",
                     _ => "📞 Помощь:\nТелефон: +998 90 379 29 39\nTelegram: @ronchece"
@@ -190,12 +247,13 @@ namespace TelegramBot
                 return;
             }
 
-            if (messageText is "📱 Мы в социальной сети" or "📱 Ijtimoiy tarmoqlardamiz" or "📱 Social Networks")
+            if (messageText is "📱 Мы в социальной сети" or "📱 Ijtimoiy tarmoqlardamiz" or "📱 Social Networks" or "📱 Biz sociallıq tarmaqlarda")
             {
                 await SendSocialMediaMenu(botClient, chatIdMsg, userState, cancellationToken);
                 return;
             }
 
+            // Шаги регистрации
             switch (userState.Step)
             {
                 case RegistrationStep.AwaitingName:
@@ -203,6 +261,7 @@ namespace TelegramBot
                     userState.Step = RegistrationStep.AwaitingPhone;
                     string phonePrompt = userState.Language switch
                     {
+                        "qr" => "Telefon nomerińizdi mınaw formatta kiritiń: +998 хх ххх хх хх",
                         "uz" => "Телефон рақамингизни шу форматда киритинг: +998 хх ххх хх хх",
                         "en" => "Enter your phone number in the format: +998 xx xxx xx xx",
                         _ => "Введите номер телефона в формате: +998 хх ххх хх хх"
@@ -215,6 +274,7 @@ namespace TelegramBot
                     {
                         string errorPhone = userState.Language switch
                         {
+                            "qr" => "Format qe'te! Iltimas, nomerdi +998 хх ххх хх хх formatında kiritiń:",
                             "uz" => "Формат нотўғри! Илтимос, рақамни +998 хх ххх хх хх форматида киритинг:",
                             "en" => "Invalid format! Please enter phone number in format +998 xx xxx xx xx:",
                             _ => "Неверный формат! Введите номер строго в формате +998 хх ххх хх хх:"
@@ -224,33 +284,105 @@ namespace TelegramBot
                     }
 
                     userState.PhoneNumber = messageText;
-                    userState.Step = RegistrationStep.AwaitingTeamName;
-                    string teamPrompt = userState.Language switch
+
+                    if (userState.IsLeader)
                     {
-                        "uz" => "Жамоангиз номини киритинг:",
-                        "en" => "Enter your team name:",
-                        _ => "Напишите название для своей команды:"
-                    };
-                    await botClient.SendMessage(chatIdMsg, teamPrompt, cancellationToken: cancellationToken);
+                        userState.Step = RegistrationStep.AwaitingTeamName;
+                        string teamPrompt = userState.Language switch
+                        {
+                            "qr" => "Komandańızdıń atamasını kiritiń:",
+                            "uz" => "Жамоангиз номини киритинг:",
+                            "en" => "Enter your team name:",
+                            _ => "Напишите название для своей команды:"
+                        };
+                        await botClient.SendMessage(chatIdMsg, teamPrompt, cancellationToken: cancellationToken);
+                    }
+                    else if (!string.IsNullOrEmpty(userState.PendingTeamId) && Teams.TryGetValue(userState.PendingTeamId, out var targetTeam))
+                    {
+                        // Регистрация участника по ссылке
+                        userState.TeamId = targetTeam.TeamId;
+                        targetTeam.Members.Add(chatIdMsg);
+                        userState.Step = RegistrationStep.None;
+
+                        string joinedMsg = userState.Language switch
+                        {
+                            "qr" => $"🎉 Siz \"{targetTeam.Name}\" komandasina qosıldın'ız!",
+                            "uz" => $"🎉 Siz \"{targetTeam.Name}\" jamoasiga qo'shildingiz!",
+                            "en" => $"🎉 You successfully joined the team \"{targetTeam.Name}\"!",
+                            _ => $"🎉 Вы успешно присоединились к команде «{targetTeam.Name}»!"
+                        };
+                        await botClient.SendMessage(chatIdMsg, joinedMsg, cancellationToken: cancellationToken);
+
+                        // Уведомление лидеру
+                        string notifyLeader = $"🔔 **Новый участник в вашей команде!**\n\n👤 Имя: {userState.FullName}\n📞 Телефон: {userState.PhoneNumber}";
+                        try { await botClient.SendMessage(targetTeam.LeaderChatId, notifyLeader, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken); } catch { }
+
+                        // Отчет админу
+                        if (AdminChatId != 0)
+                        {
+                            try
+                            {
+                                string adminNotice = $"🚨 **Новый участник присоединился к команде!**\n\n👥 Команда: {targetTeam.Name}\n👤 Имя: {userState.FullName}\n📞 Телефон: {userState.PhoneNumber}";
+                                await botClient.SendMessage(AdminChatId, adminNotice, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+                            }
+                            catch { }
+                        }
+
+                        await SendMainMenu(botClient, chatIdMsg, userState, cancellationToken);
+                    }
                     break;
 
                 case RegistrationStep.AwaitingTeamName:
-                    userState.TeamName = messageText;
+                    string desiredTeamName = messageText.Trim();
+
+                    // Проверка занятости названия
+                    bool exists = Teams.Values.Any(t => t.Name.Equals(desiredTeamName, StringComparison.OrdinalIgnoreCase));
+                    if (exists)
+                    {
+                        string nameTaken = userState.Language switch
+                        {
+                            "qr" => "❌ Bul komanda ataması e'yye'm ba'nt! Basqa atama kiritiń:",
+                            "uz" => "❌ Bu jamoa nomi band! Boshqa nom kiriting:",
+                            "en" => "❌ This team name is already taken! Please enter another name:",
+                            _ => "❌ Это название команды уже занято! Пожалуйста, введите другое название:"
+                        };
+                        await botClient.SendMessage(chatIdMsg, nameTaken, cancellationToken: cancellationToken);
+                        return;
+                    }
+
+                    // Создание команды
+                    string newTeamId = Guid.NewGuid().ToString("N").Substring(0, 8);
+                    var newTeam = new TeamModel
+                    {
+                        TeamId = newTeamId,
+                        Name = desiredTeamName,
+                        LeaderChatId = chatIdMsg,
+                        Members = new List<long> { chatIdMsg }
+                    };
+
+                    Teams[newTeamId] = newTeam;
+                    userState.TeamId = newTeamId;
                     userState.Step = RegistrationStep.None;
 
-                    string successMsg = userState.Language switch
-                    {
-                        "uz" => $"🎉 Муваффақиятли рўйхатдан ўтдингиз!\n\n👤 Исм: {userState.FullName}\n📞 Рақам: {userState.PhoneNumber}\n👥 Жамоа: {userState.TeamName}",
-                        "en" => $"🎉 Registration successful!\n\n👤 Name: {userState.FullName}\n📞 Phone: {userState.PhoneNumber}\n👥 Team: {userState.TeamName}",
-                        _ => $"🎉 Вы успешно зарегистрировались!\n\n👤 Имя: {userState.FullName}\n📞 Номер: {userState.PhoneNumber}\n👥 Команда: {userState.TeamName}"
-                    };
-                    await botClient.SendMessage(chatIdMsg, successMsg, cancellationToken: cancellationToken);
+                    var me = await botClient.GetMe(cancellationToken);
+                    string inviteLink = $"https://t.me/{me.Username}?start=team_{newTeamId}";
 
+                    string successLeaderMsg = userState.Language switch
+                    {
+                        "qr" => $"🎉 Komandag'a basshı bolıp dizimnen o'ttińiz!\n\n👥 Komanda: {newTeam.Name}\n👤 Atı: {userState.FullName}\n📞 Nomeri: {userState.PhoneNumber}\n\n🔗 Agzalardı chaqırıw ushın siltewiniz:\n`{inviteLink}`",
+                        "uz" => $"🎉 Jamoa sardori sifatida ro'yxatdan o'tdingiz!\n\n👥 Jamoa: {newTeam.Name}\n👤 Ism: {userState.FullName}\n📞 Raqam: {userState.PhoneNumber}\n\n🔗 A'zolarni taklif qilish havolasi:\n`{inviteLink}`",
+                        "en" => $"🎉 Registered as Team Captain!\n\n👥 Team: {newTeam.Name}\n👤 Name: {userState.FullName}\n📞 Phone: {userState.PhoneNumber}\n\n🔗 Invite link for team members:\n`{inviteLink}`",
+                        _ => $"🎉 Вы успешно зарегистрировали команду как капитан!\n\n👥 Команда: {newTeam.Name}\n👤 Имя: {userState.FullName}\n📞 Номер: {userState.PhoneNumber}\n\n🔗 Пригласительная ссылка для вашей команды:\n`{inviteLink}`"
+                    };
+
+                    await botClient.SendMessage(chatIdMsg, successLeaderMsg, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+
+                    // Уведомление админу
                     if (AdminChatId != 0)
                     {
                         try
                         {
-                            string adminNotification = $"🚨 **Новый участник зарегистрировался!**\n\n👤 Имя: {userState.FullName}\n📞 Телефон: {userState.PhoneNumber}\n👥 Команда: {userState.TeamName}\n💬 Telegram ID: `{chatIdMsg}`";
+                            string adminNotification = $"🚨 **Создана новая команда!**\n\n👥 Команда: {newTeam.Name}\n👑 Капитан: {userState.FullName}\n📞 Телефон: {userState.PhoneNumber}";
                             await botClient.SendMessage(AdminChatId, adminNotification, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
                         }
                         catch { }
@@ -261,20 +393,63 @@ namespace TelegramBot
             }
         }
 
+        private static async Task ShowMyTeamInfo(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(user.TeamId) || !Teams.TryGetValue(user.TeamId, out var team))
+            {
+                string noTeam = user.Language switch
+                {
+                    "qr" => "Siz hesh qanday komandag'a a'zo emessiz.",
+                    "uz" => "Siz hech qanday jamoaga a'zo emassiz.",
+                    "en" => "You are not in any team.",
+                    _ => "Вы пока не состоите в команде."
+                };
+                await botClient.SendMessage(chatId, noTeam, cancellationToken: cancellationToken);
+                return;
+            }
+
+            var me = await botClient.GetMe(cancellationToken);
+            string inviteLink = $"https://t.me/{me.Username}?start=team_{team.TeamId}";
+
+            string memberList = "";
+            int index = 1;
+            foreach (var memberId in team.Members)
+            {
+                if (Users.TryGetValue(memberId, out var memberUser))
+                {
+                    string roleMark = memberId == team.LeaderChatId ? " (👑 Капитан)" : "";
+                    memberList += $"{index}. {memberUser.FullName} - {memberUser.PhoneNumber}{roleMark}\n";
+                    index++;
+                }
+            }
+
+            string info = $"👥 **Команда:** {team.Name}\n\n**Участники ({team.Members.Count}):**\n{memberList}\n🔗 **Ссылка для приглашения:**\n`{inviteLink}`";
+            await botClient.SendMessage(chatId, info, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+        }
+
         private static async Task SendSubscriptionPrompt(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
         {
             string text = user.Language switch
             {
+                "qr" => "Dizimnen o'tiw ushın tómendegi kanal ha'm betke agza bolıń:",
                 "uz" => "Ro'yxatdan o'tish uchun quyidagi kanal va sahifaga obuna bo'ling:",
                 "en" => "To register, please subscribe to our channel and page:",
                 _ => "Для регистрации подпишитесь на наш канал и страницу:"
             };
 
+            string checkBtnText = user.Language switch
+            {
+                "qr" => "✅ Agzalıqtı tekseriw",
+                "uz" => "✅ Obunani tekshirish",
+                "en" => "✅ Check Subscription",
+                _ => "✅ Проверить подписку"
+            };
+
             var keyboard = new InlineKeyboardMarkup(new[]
             {
-                new[] { InlineKeyboardButton.WithUrl("📢 Telegram канал", "https://t.me/ekologlar_kr") },
+                new[] { InlineKeyboardButton.WithUrl("📢 Telegram kanal", "https://t.me/ekologlar_kr") },
                 new[] { InlineKeyboardButton.WithUrl("📸 Instagram", "https://www.instagram.com/ekologlar_hareketi_qr?vrfl=emh1cW93Z21ibm54") },
-                new[] { InlineKeyboardButton.WithCallbackData(user.Language == "uz" ? "✅ Obunani tekshirish" : user.Language == "en" ? "✅ Check Subscription" : "✅ Проверить подписку", "check_subscription") }
+                new[] { InlineKeyboardButton.WithCallbackData(checkBtnText, "check_subscription") }
             });
 
             await botClient.SendMessage(chatId, text, replyMarkup: keyboard, cancellationToken: cancellationToken);
@@ -284,33 +459,42 @@ namespace TelegramBot
         {
             var keyboard = new ReplyKeyboardMarkup(new[]
             {
-                new KeyboardButton[] { "Русский 🇷🇺", "O'zbekcha 🇺🇿", "English 🇬🇧" }
+                new KeyboardButton[] { "Русский 🇷🇺", "O'zbekcha 🇺🇿" },
+                new KeyboardButton[] { "Qaraqalpaq tili 🇺🇿", "English 🇬🇧" }
             })
             {
                 ResizeKeyboard = true
             };
 
-            await botClient.SendMessage(chatId, "Выберите язык / Tilingizni tanlang / Choose your language:", replyMarkup: keyboard, cancellationToken: cancellationToken);
+            await botClient.SendMessage(chatId, "Выберите язык / Tilingizni tanlang / Tildi saylań / Choose language:", replyMarkup: keyboard, cancellationToken: cancellationToken);
         }
 
         private static async Task SendMainMenu(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
         {
-            string regBtn = user.Language switch { "uz" => "Ro'yxatdan o'tish", "en" => "Registration", _ => "Регистрация" };
-            string helpBtn = user.Language switch { "uz" => "Yordam", "en" => "Help", _ => "Помощь" };
-            string socialBtn = user.Language switch { "uz" => "📱 Ijtimoiy tarmoqlardamiz", "en" => "📱 Social Networks", _ => "📱 Мы в социальной сети" };
+            string createTeamBtn = user.Language switch { "qr" => "➕ Komanda dözetip", "uz" => "➕ Jamoa yaratish", "en" => "➕ Create Team", _ => "➕ Создать команду" };
+            string myTeamBtn = user.Language switch { "qr" => "👥 Benim komandam", "uz" => "👥 Mening jamoam", "en" => "👥 My Team", _ => "👥 Моя команда" };
+            string helpBtn = user.Language switch { "qr" => "Anıqlama", "uz" => "Yordam", "en" => "Help", _ => "Помощь" };
+            string socialBtn = user.Language switch { "qr" => "📱 Biz sociallıq tarmaqlarda", "uz" => "📱 Ijtimoiy tarmoqlardamiz", "en" => "📱 Social Networks", _ => "📱 Мы в социальной сети" };
 
-            var keyboard = new ReplyKeyboardMarkup(new[]
+            var keyboardList = new List<KeyboardButton[]>();
+
+            if (string.IsNullOrEmpty(user.TeamId))
             {
-                new KeyboardButton[] { regBtn, helpBtn },
-                new KeyboardButton[] { socialBtn },
-                new KeyboardButton[] { "🌐 Выбрать язык / Tilingizni tanlang / Choose language" }
-            })
+                keyboardList.Add(new KeyboardButton[] { createTeamBtn, helpBtn });
+            }
+            else
             {
-                ResizeKeyboard = true
-            };
+                keyboardList.Add(new KeyboardButton[] { myTeamBtn, helpBtn });
+            }
+
+            keyboardList.Add(new KeyboardButton[] { socialBtn });
+            keyboardList.Add(new KeyboardButton[] { "🌐 Выбрать язык / Tilingizni tanlang / Choose language" });
+
+            var keyboard = new ReplyKeyboardMarkup(keyboardList) { ResizeKeyboard = true };
 
             string text = user.Language switch
             {
+                "qr" => "Bas menyu. Kerekli bólimdi saylań:",
                 "uz" => "Асосий меню. Керакли бўлимни танланг:",
                 "en" => "Main Menu. Choose an option:",
                 _ => "Главное меню. Выберите нужный раздел:"
@@ -321,8 +505,8 @@ namespace TelegramBot
 
         private static async Task SendSocialMediaMenu(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
         {
-            string tgText = user.Language switch { "uz" => "📢 Telegram kanal", "en" => "📢 Telegram Channel", _ => "📢 Telegram канал" };
-            string instaText = user.Language switch { "uz" => "📸 Instagram sahifa", "en" => "📸 Instagram Page", _ => "📸 Instagram аккаунт" };
+            string tgText = user.Language switch { "qr" => "📢 Telegram kanal", "uz" => "📢 Telegram kanal", "en" => "📢 Telegram Channel", _ => "📢 Telegram канал" };
+            string instaText = user.Language switch { "qr" => "📸 Instagram beti", "uz" => "📸 Instagram sahifa", "en" => "📸 Instagram Page", _ => "📸 Instagram аккаунт" };
 
             var inlineKeyboard = new InlineKeyboardMarkup(new[]
             {
@@ -332,6 +516,7 @@ namespace TelegramBot
 
             string menuTitle = user.Language switch
             {
+                "qr" => "Bizdin' sociallıq tarmaqlarımız:",
                 "uz" => "Bizning ijtimoiy tarmoqlarimiz:",
                 "en" => "Our social networks:",
                 _ => "Наши социальные сети:"
