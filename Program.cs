@@ -1,8 +1,10 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -32,7 +34,7 @@ namespace TelegramBot
         public string FullName { get; set; } = "";
         public string PhoneNumber { get; set; } = "";
         public string TeamId { get; set; } = "";
-        public string PendingTeamId { get; set; } = ""; // Запоминаем команду при переходе по ссылке или коду
+        public string PendingTeamId { get; set; } = "";
         public bool IsLeader { get; set; } = false;
     }
 
@@ -51,10 +53,7 @@ namespace TelegramBot
         private static readonly ConcurrentDictionary<string, TeamModel> TeamsByCode = new(StringComparer.OrdinalIgnoreCase);
         private static readonly ConcurrentDictionary<string, TeamModel> TeamsById = new(StringComparer.OrdinalIgnoreCase);
         
-        // Твой личный Chat ID для уведомлений
         private static readonly long AdminChatId = 8791726949; 
-
-        // Канал для обязательной проверки подписки
         private static readonly string RequiredChannel = "@ekologlar_kr";
 
         static async Task Main(string[] args)
@@ -110,7 +109,6 @@ namespace TelegramBot
 
         private static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
         {
-            // Проверка кнопки "Проверить подписку"
             if (update.CallbackQuery is { } callbackQuery)
             {
                 long chatId = callbackQuery.Message!.Chat.Id;
@@ -129,7 +127,7 @@ namespace TelegramBot
                     }
                     catch
                     {
-                        isSubscribed = true; // Если бот не админ, пропускаем
+                        isSubscribed = true; 
                     }
 
                     if (isSubscribed)
@@ -142,7 +140,6 @@ namespace TelegramBot
                             _ => "✅ Подписка подтверждена!"
                         }, cancellationToken: cancellationToken);
 
-                        // Переходим к вводу имени
                         user.Step = RegistrationStep.AwaitingName;
                         string prompt = user.Language switch
                         {
@@ -173,7 +170,31 @@ namespace TelegramBot
             long chatIdMsg = message.Chat.Id;
             var userState = Users.GetOrAdd(chatIdMsg, _ => new UserState { ChatId = chatIdMsg });
 
-            // Обработка /start с аргументами ссылки
+            // Админ-команда экспорта в Excel (CSV)
+            if (messageText.StartsWith("/export") && chatIdMsg == AdminChatId)
+            {
+                await ExportDataToAdmin(botClient, chatIdMsg, cancellationToken);
+                return;
+            }
+
+            // Админ-рассылка: /broadcast Текст сообщения
+            if (messageText.StartsWith("/broadcast ") && chatIdMsg == AdminChatId)
+            {
+                string broadcastText = messageText.Substring(11).Trim();
+                int successCount = 0;
+                foreach (var kvp in Users)
+                {
+                    try
+                    {
+                        await botClient.SendMessage(kvp.Key, $"📢 **Объявление от организаторов:**\n\n{broadcastText}", parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+                        successCount++;
+                    }
+                    catch { }
+                }
+                await botClient.SendMessage(chatIdMsg, $"✅ Рассылка завершена успешно! Получателей: {successCount}", cancellationToken: cancellationToken);
+                return;
+            }
+
             if (messageText.StartsWith("/start"))
             {
                 userState.Step = RegistrationStep.None;
@@ -186,6 +207,20 @@ namespace TelegramBot
                         userState.PendingTeamId = targetTeamId;
                     }
                 }
+
+                string welcomeIntro = 
+                    "🌿 **Xush kelibsiz! Welcome! Xosh kelipsiz! Добро пожаловать!**\n\n" +
+                    "🇷🇺 **О проекте и командах:**\n" +
+                    "Этот бот предназначен для регистрации участников. Вы можете создать собственную команду (став её капитаном) или присоединиться к уже существующей по специальной ссылке или секретному коду.\n\n" +
+                    "🇺🇿 **Loyiha va jamoalar haqida:**\n" +
+                    "Ushbu bot ishtirokchilarni ro'yxatdan o'tkazish uchun mo'ljallangan. Siz o'z jamoangizni yaratishingiz (sardor bo'lishingiz) yoki maxsus havola yoki maxfiy kod yordamida mavjud jamoaga qo'shilishingiz mumkin.\n\n" +
+                    "🇰🇷 **Proekt ha'm komandalar haqqında:**\n" +
+                    "Bul bot qatnawshılardı dizimnen ótkiziw ushın mólsherlengen. Siz óz komandańızdı dóretiwshisi (kapitanı) bola alasız yamasa arnawlı siltew hám jasırın kod arqalı basqa komandag'a qosıla alasız.\n\n" +
+                    "🇬🇧 **About the project and teams:**\n" +
+                    "This bot is designed to register participants. You can create your own team (becoming its captain) or join an existing team via a special link or secret code.\n\n" +
+                    "👇 *Iltimos, tilni tanlang / Tildi saylań / Выберите язык / Choose language:*";
+
+                await botClient.SendMessage(chatIdMsg, welcomeIntro, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
                 await SendLanguageMenu(botClient, chatIdMsg, cancellationToken);
                 return;
             }
@@ -265,14 +300,23 @@ namespace TelegramBot
                 return;
             }
 
+            if (messageText is "🚪 Выйти из команды" or "🚪 Komandadan shıg'ıw" or "🚪 Jamoadan chiqish" or "🚪 Leave Team")
+            {
+                await LeaveTeam(botClient, chatIdMsg, userState, cancellationToken);
+                return;
+            }
+
             if (messageText is "Помощь" or "Yordam" or "Help" or "Anıqlama")
             {
+                int registeredCount = Users.Values.Count(u => !string.IsNullOrEmpty(u.FullName));
+                int teamsCount = TeamsById.Count;
+
                 string helpText = userState.Language switch
                 {
-                    "qr" => "📞 Anıqlama:\nTelefon: +998 90 379 29 39\nTelegram: @ronchece",
-                    "uz" => "📞 Yordam:\nTelefon: +998 90 379 29 39\nTelegram: @ronchece",
-                    "en" => "📞 Help:\nPhone: +998 90 379 29 39\nTelegram: @ronchece",
-                    _ => "📞 Помощь:\nТелефон: +998 90 379 29 39\nTelegram: @ronchece"
+                    "qr" => $"📞 Anıqlama ha'm statistika:\n📊 Dizimnen ótkenler: {registeredCount}\n👥 Dözetilgen komandalar: {teamsCount}\n\nTelefon: +998 90 379 29 39\nTelegram: @ronchece",
+                    "uz" => $"📞 Yordam va statistika:\n📊 Ro'yxatdan o'tganlar: {registeredCount}\n👥 Tuzilgan jamoalar: {teamsCount}\n\nTelefon: +998 90 379 29 39\nTelegram: @ronchece",
+                    "en" => $"📞 Help & Statistics:\n📊 Registered users: {registeredCount}\n👥 Created teams: {teamsCount}\n\nPhone: +998 90 379 29 39\nTelegram: @ronchece",
+                    _ => $"📞 Помощь и статистика:\n📊 Зарегистрировано участников: {registeredCount}\n👥 Создано команд: {teamsCount}\n\nТелефон: +998 90 379 29 39\nTelegram: @ronchece"
                 };
                 await botClient.SendMessage(chatIdMsg, helpText, cancellationToken: cancellationToken);
                 return;
@@ -284,7 +328,6 @@ namespace TelegramBot
                 return;
             }
 
-            // Шаги регистрации
             switch (userState.Step)
             {
                 case RegistrationStep.AwaitingSecretCode:
@@ -351,7 +394,6 @@ namespace TelegramBot
                     }
                     else if (!string.IsNullOrEmpty(userState.PendingTeamId) && TeamsById.TryGetValue(userState.PendingTeamId, out var targetTeam))
                     {
-                        // Регистрация участника
                         userState.TeamId = targetTeam.TeamId;
                         if (!targetTeam.Members.Contains(chatIdMsg))
                         {
@@ -368,11 +410,9 @@ namespace TelegramBot
                         };
                         await botClient.SendMessage(chatIdMsg, joinedMsg, cancellationToken: cancellationToken);
 
-                        // Уведомление лидеру
                         string notifyLeader = $"🔔 **Новый участник в вашей команде!**\n\n👤 Имя: {userState.FullName}\n📞 Телефон: {userState.PhoneNumber}";
                         try { await botClient.SendMessage(targetTeam.LeaderChatId, notifyLeader, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken); } catch { }
 
-                        // Отчет админу
                         if (AdminChatId != 0)
                         {
                             try
@@ -390,7 +430,6 @@ namespace TelegramBot
                 case RegistrationStep.AwaitingTeamName:
                     string desiredTeamName = messageText.Trim();
 
-                    // Проверка уникальности названия команды
                     bool exists = TeamsById.Values.Any(t => t.Name.Equals(desiredTeamName, StringComparison.OrdinalIgnoreCase));
                     if (exists)
                     {
@@ -405,7 +444,6 @@ namespace TelegramBot
                         return;
                     }
 
-                    // Генерация секретного кода из 6 символов
                     string secretCode = Guid.NewGuid().ToString("N").Substring(0, 6).ToUpper();
                     string newTeamId = Guid.NewGuid().ToString("N").Substring(0, 8);
 
@@ -437,7 +475,6 @@ namespace TelegramBot
 
                     await botClient.SendMessage(chatIdMsg, successLeaderMsg, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
 
-                    // Уведомление админу
                     if (AdminChatId != 0)
                     {
                         try
@@ -451,6 +488,90 @@ namespace TelegramBot
                     await SendMainMenu(botClient, chatIdMsg, userState, cancellationToken);
                     break;
             }
+        }
+
+        private static async Task LeaveTeam(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(user.TeamId) || !TeamsById.TryGetValue(user.TeamId, out var team))
+            {
+                string noTeam = user.Language switch
+                {
+                    "qr" => "Siz hesh qanday komandag'a a'zo emessiz.",
+                    "uz" => "Siz hech qanday jamoaga a'zo emassiz.",
+                    "en" => "You are not in any team.",
+                    _ => "Вы не состоите в команде."
+                };
+                await botClient.SendMessage(chatId, noTeam, cancellationToken: cancellationToken);
+                return;
+            }
+
+            if (team.LeaderChatId == chatId)
+            {
+                // Если капитан выходит — удаляем команду полностью
+                TeamsById.TryRemove(team.TeamId, out _);
+                TeamsByCode.TryRemove(team.SecretCode, out _);
+
+                foreach (var memberId in team.Members)
+                {
+                    if (Users.TryGetValue(memberId, out var mUser))
+                    {
+                        mUser.TeamId = "";
+                        mUser.IsLeader = false;
+                        if (memberId != chatId)
+                        {
+                            try
+                            {
+                                string disbandedMsg = mUser.Language switch
+                                {
+                                    "qr" => $"⚠️ Kapitan komandanı tarqattı, siz endi hesh qanday komandada emessiz.",
+                                    "uz" => $"⚠️ Sardor jamoani tarqatib yubordi, siz endi jamoada emassiz.",
+                                    "en" => $"⚠️ The captain disbanded the team, you are no longer in a team.",
+                                    _ => $"⚠️ Капитан распустил команду, вы больше не состоите в ней."
+                                };
+                                await botClient.SendMessage(memberId, disbandedMsg, cancellationToken: cancellationToken);
+                                await SendMainMenu(botClient, memberId, mUser, cancellationToken);
+                            }
+                            catch { }
+                        }
+                    }
+                }
+
+                user.TeamId = "";
+                user.IsLeader = false;
+
+                string leaderLeftMsg = user.Language switch
+                {
+                    "qr" => "🗑 Komandanız óshirildi.",
+                    "uz" => "🗑 Jamoangiz o'chirildi.",
+                    "en" => "🗑 Your team has been deleted.",
+                    _ => "🗑 Ваша команда была удалена."
+                };
+                await botClient.SendMessage(chatId, leaderLeftMsg, cancellationToken: cancellationToken);
+            }
+            else
+            {
+                // Обычный участник выходит
+                team.Members.Remove(chatId);
+                user.TeamId = "";
+
+                string leftMsg = user.Language switch
+                {
+                    "qr" => $"🚪 Siz \"{team.Name}\" komandasınan shıqtıńız.",
+                    "uz" => $"🚪 Siz \"{team.Name}\" jamoasidan chiqdingiz.",
+                    "en" => $"🚪 You left the team \"{team.Name}\".",
+                    _ => $"🚪 Вы вышли из команды «{team.Name}»."
+                };
+                await botClient.SendMessage(chatId, leftMsg, cancellationToken: cancellationToken);
+
+                try
+                {
+                    string notifyLeader = $"⚠️ Участник {user.FullName} покинул вашу команду.";
+                    await botClient.SendMessage(team.LeaderChatId, notifyLeader, cancellationToken: cancellationToken);
+                }
+                catch { }
+            }
+
+            await SendMainMenu(botClient, chatId, user, cancellationToken);
         }
 
         private static async Task ShowMyTeamInfo(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
@@ -485,6 +606,30 @@ namespace TelegramBot
 
             string info = $"👥 **Команда:** {team.Name}\n🔐 **Секретный код:** `{team.SecretCode}`\n\n**Участники ({team.Members.Count}):**\n{memberList}\n🔗 **Ссылка для приглашения:**\n`{inviteLink}`";
             await botClient.SendMessage(chatId, info, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+        }
+
+        private static async Task ExportDataToAdmin(ITelegramBotClient botClient, long adminChatId, CancellationToken cancellationToken)
+        {
+            var csv = new StringBuilder();
+            csv.AppendLine("TeamName,SecretCode,Role,FullName,PhoneNumber,TelegramId");
+
+            foreach (var team in TeamsById.Values)
+            {
+                foreach (var memberId in team.Members)
+                {
+                    if (Users.TryGetValue(memberId, out var u))
+                    {
+                        string role = memberId == team.LeaderChatId ? "Captain" : "Member";
+                        csv.AppendLine($"\"{team.Name}\",\"{team.SecretCode}\",\"{role}\",\"{u.FullName}\",\"{u.PhoneNumber}\",\"{memberId}\"");
+                    }
+                }
+            }
+
+            var bytes = Encoding.UTF8.GetBytes(csv.ToString());
+            using var stream = new MemoryStream(bytes);
+            var fileStream = new InputFileStream(stream, "teams_report.csv");
+
+            await botClient.SendDocument(adminChatId, fileStream, caption: "📊 Полный отчет по командам и участникам (CSV)", cancellationToken: cancellationToken);
         }
 
         private static async Task SendSubscriptionPrompt(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
@@ -534,6 +679,7 @@ namespace TelegramBot
             string createTeamBtn = user.Language switch { "qr" => "➕ Komanda dözetip", "uz" => "➕ Jamoa yaratish", "en" => "➕ Create Team", _ => "➕ Создать команду" };
             string joinTeamBtn = user.Language switch { "qr" => "🔗 Kod arqalı qosılıw", "uz" => "🔗 Kod orqali qo'shilish", "en" => "🔗 Join by Code", _ => "🔗 Присоединиться по коду" };
             string myTeamBtn = user.Language switch { "qr" => "👥 Benim komandam", "uz" => "👥 Mening jamoam", "en" => "👥 My Team", _ => "👥 Моя команда" };
+            string leaveTeamBtn = user.Language switch { "qr" => "🚪 Komandadan shıg'ıw", "uz" => "🚪 Jamoadan chiqish", "en" => "🚪 Leave Team", _ => "🚪 Выйти из команды" };
             string helpBtn = user.Language switch { "qr" => "Anıqlama", "uz" => "Yordam", "en" => "Help", _ => "Помощь" };
             string socialBtn = user.Language switch { "qr" => "📱 Biz sociallıq tarmaqlarda", "uz" => "📱 Ijtimoiy tarmoqlardamiz", "en" => "📱 Social Networks", _ => "📱 Мы в социальной сети" };
 
@@ -546,8 +692,8 @@ namespace TelegramBot
             }
             else
             {
-                keyboardList.Add(new KeyboardButton[] { myTeamBtn, helpBtn });
-                keyboardList.Add(new KeyboardButton[] { socialBtn });
+                keyboardList.Add(new KeyboardButton[] { myTeamBtn, leaveTeamBtn });
+                keyboardList.Add(new KeyboardButton[] { helpBtn, socialBtn });
             }
 
             keyboardList.Add(new KeyboardButton[] { "🌐 Выбрать язык / Tilingizni tanlang / Choose language" });
