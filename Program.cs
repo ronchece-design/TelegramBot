@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -34,6 +35,20 @@ namespace TelegramBot
 
         static async Task Main(string[] args)
         {
+            // Открываем порт для Render, чтобы Web Service не выдавал ошибку таймаута
+            try
+            {
+                var listener = new HttpListener();
+                int port = int.Parse(Environment.GetEnvironmentVariable("PORT") ?? "8080");
+                listener.Prefixes.Add($"http://*:{port}/");
+                listener.Start();
+                Task.Run(async () => { while (true) { var ctx = await listener.GetContextAsync(); ctx.Response.Close(); } });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Порт не запущен (это нормально для локального ПК): {ex.Message}");
+            }
+
             var token = Environment.GetEnvironmentVariable("BOT_TOKEN");
             if (string.IsNullOrEmpty(token))
             {
