@@ -8,6 +8,7 @@ using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
 
 namespace TelegramBot
@@ -33,12 +34,14 @@ namespace TelegramBot
     {
         private static readonly ConcurrentDictionary<long, UserState> Users = new();
         
-        // Твой личный Chat ID для уведомлений о новых регистрациях
+        // Твой личный Chat ID для уведомлений
         private static readonly long AdminChatId = 8791726949; 
+
+        // Единственный Telegram-канал для обязательной проверки подписки
+        private static readonly string RequiredChannel = "@ekologlar_kr";
 
         static async Task Main(string[] args)
         {
-            // Открываем порт для Render Web Service, чтобы сервер не закрывал процесс
             try
             {
                 var listener = new HttpListener();
@@ -59,7 +62,7 @@ namespace TelegramBot
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Порт не запущен (это нормально для ПК): {ex.Message}");
+                Console.WriteLine($"Порт не запущен: {ex.Message}");
             }
 
             var token = Environment.GetEnvironmentVariable("BOT_TOKEN");
@@ -74,7 +77,7 @@ namespace TelegramBot
 
             var receiverOptions = new ReceiverOptions
             {
-                AllowedUpdates = Array.Empty<Telegram.Bot.Types.Enums.UpdateType>()
+                AllowedUpdates = Array.Empty<UpdateType>()
             };
 
             botClient.StartReceiving(
@@ -90,132 +93,191 @@ namespace TelegramBot
 
         private static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
         {
+            // Проверка нажатия на кнопку проверки подписки
+            if (update.CallbackQuery is { } callbackQuery)
+            {
+                long chatId = callbackQuery.Message!.Chat.Id;
+                var user = Users.GetOrAdd(chatId, _ => new UserState());
+
+                if (callbackQuery.Data == "check_subscription")
+                {
+                    bool isSubscribed = false;
+                    try
+                    {
+                        var member = await botClient.GetChatMemberAsync(RequiredChannel, chatId, cancellationToken);
+                        if (member.Status is ChatMemberStatus.Member or ChatMemberStatus.Administrator or ChatMemberStatus.Creator)
+                        {
+                            isSubscribed = true;
+                        }
+                    }
+                    catch
+                    {
+                        isSubscribed = true; // Если бот не админ в канале, временно пропускаем
+                    }
+
+                    if (isSubscribed)
+                    {
+                        await botClient.AnswerCallbackQuery(callbackQuery.Id, user.Language switch
+                        {
+                            "uz" => "✅ Obuna tasdiqlandi!",
+                            "en" => "✅ Subscription confirmed!",
+                            _ => "✅ Подписка подтверждена!"
+                        }, cancellationToken: cancellationToken);
+
+                        user.Step = RegistrationStep.AwaitingName;
+                        string prompt = user.Language switch
+                        {
+                            "uz" => "Исм ва фамилиянгизни киритинг (масалан: Иван Иванов):",
+                            "en" => "Please enter your Name and Surname (e.g. John Doe):",
+                            _ => "Введите ваше Имя и Фамилию (например: Иван Иванов):"
+                        };
+                        await botClient.SendMessage(chatId, prompt, replyMarkup: new ReplyKeyboardRemove(), cancellationToken: cancellationToken);
+                    }
+                    else
+                    {
+                        await botClient.AnswerCallbackQuery(callbackQuery.Id, user.Language switch
+                        {
+                            "uz" => "❌ Iltimos, avval kanalga obuna bo'ling!",
+                            "en" => "❌ Please subscribe to the channel first!",
+                            _ => "❌ Пожалуйста, подпишитесь на канал!"
+                        }, showAlert: true, cancellationToken: cancellationToken);
+                    }
+                }
+                return;
+            }
+
             if (update.Message is not { } message || message.Text is not { } messageText)
                 return;
 
-            long chatId = message.Chat.Id;
-            var user = Users.GetOrAdd(chatId, _ => new UserState());
+            long chatIdMsg = message.Chat.Id;
+            var userState = Users.GetOrAdd(chatIdMsg, _ => new UserState());
 
             if (messageText == "/start" || messageText == "🌐 Выбрать язык / Tilingizni tanlang / Choose language")
             {
-                user.Step = RegistrationStep.None;
-                await SendLanguageMenu(botClient, chatId, cancellationToken);
+                userState.Step = RegistrationStep.None;
+                await SendLanguageMenu(botClient, chatIdMsg, cancellationToken);
                 return;
             }
 
             if (messageText is "Русский 🇷🇺" or "O'zbekcha 🇺🇿" or "English 🇬🇧")
             {
-                user.Language = messageText switch
+                userState.Language = messageText switch
                 {
                     "O'zbekcha 🇺🇿" => "uz",
                     "English 🇬🇧" => "en",
                     _ => "ru"
                 };
-                user.Step = RegistrationStep.None;
-                await SendMainMenu(botClient, chatId, user, cancellationToken);
+                userState.Step = RegistrationStep.None;
+                await SendMainMenu(botClient, chatIdMsg, userState, cancellationToken);
                 return;
             }
 
             if (messageText is "Регистрация" or "Ro'yxatdan o'tish" or "Registration")
             {
-                user.Step = RegistrationStep.AwaitingName;
-                string prompt = user.Language switch
-                {
-                    "uz" => "Исм ва фамилиянгизни киритинг (масалан: Иван Иванов):",
-                    "en" => "Please enter your Name and Surname (e.g. John Doe):",
-                    _ => "Введите ваше Имя и Фамилию (например: Иван Иванов):"
-                };
-                await botClient.SendMessage(chatId, prompt, replyMarkup: new ReplyKeyboardRemove(), cancellationToken: cancellationToken);
+                await SendSubscriptionPrompt(botClient, chatIdMsg, userState, cancellationToken);
                 return;
             }
 
             if (messageText is "Помощь" or "Yordam" or "Help")
             {
-                string helpText = user.Language switch
+                string helpText = userState.Language switch
                 {
                     "uz" => "📞 Yordam:\nTelefon: +998 90 379 29 39\nTelegram: @ronchece",
                     "en" => "📞 Help:\nPhone: +998 90 379 29 39\nTelegram: @ronchece",
                     _ => "📞 Помощь:\nТелефон: +998 90 379 29 39\nTelegram: @ronchece"
                 };
-                await botClient.SendMessage(chatId, helpText, cancellationToken: cancellationToken);
+                await botClient.SendMessage(chatIdMsg, helpText, cancellationToken: cancellationToken);
                 return;
             }
 
-            // Обработка кнопки социальных сетей
             if (messageText is "📱 Мы в социальной сети" or "📱 Ijtimoiy tarmoqlardamiz" or "📱 Social Networks")
             {
-                await SendSocialMediaMenu(botClient, chatId, user, cancellationToken);
+                await SendSocialMediaMenu(botClient, chatIdMsg, userState, cancellationToken);
                 return;
             }
 
-            switch (user.Step)
+            switch (userState.Step)
             {
                 case RegistrationStep.AwaitingName:
-                    user.FullName = messageText;
-                    user.Step = RegistrationStep.AwaitingPhone;
-                    string phonePrompt = user.Language switch
+                    userState.FullName = messageText;
+                    userState.Step = RegistrationStep.AwaitingPhone;
+                    string phonePrompt = userState.Language switch
                     {
                         "uz" => "Телефон рақамингизни шу форматда киритинг: +998 хх ххх хх хх",
                         "en" => "Enter your phone number in the format: +998 xx xxx xx xx",
                         _ => "Введите номер телефона в формате: +998 хх ххх хх хх"
                     };
-                    await botClient.SendMessage(chatId, phonePrompt, cancellationToken: cancellationToken);
+                    await botClient.SendMessage(chatIdMsg, phonePrompt, cancellationToken: cancellationToken);
                     break;
 
                 case RegistrationStep.AwaitingPhone:
                     if (!Regex.IsMatch(messageText, @"^\+998\s?\d{2}\s?\d{3}\s?\d{2}\s?\d{2}$"))
                     {
-                        string errorPhone = user.Language switch
+                        string errorPhone = userState.Language switch
                         {
                             "uz" => "Формат нотўғри! Илтимос, рақамни +998 хх ххх хх хх форматида киритинг:",
                             "en" => "Invalid format! Please enter phone number in format +998 xx xxx xx xx:",
                             _ => "Неверный формат! Введите номер строго в формате +998 хх ххх хх хх:"
                         };
-                        await botClient.SendMessage(chatId, errorPhone, cancellationToken: cancellationToken);
+                        await botClient.SendMessage(chatIdMsg, errorPhone, cancellationToken: cancellationToken);
                         return;
                     }
 
-                    user.PhoneNumber = messageText;
-                    user.Step = RegistrationStep.AwaitingTeamName;
-                    string teamPrompt = user.Language switch
+                    userState.PhoneNumber = messageText;
+                    userState.Step = RegistrationStep.AwaitingTeamName;
+                    string teamPrompt = userState.Language switch
                     {
                         "uz" => "Жамоангиз номини киритинг:",
                         "en" => "Enter your team name:",
                         _ => "Напишите название для своей команды:"
                     };
-                    await botClient.SendMessage(chatId, teamPrompt, cancellationToken: cancellationToken);
+                    await botClient.SendMessage(chatIdMsg, teamPrompt, cancellationToken: cancellationToken);
                     break;
 
                 case RegistrationStep.AwaitingTeamName:
-                    user.TeamName = messageText;
-                    user.Step = RegistrationStep.None;
+                    userState.TeamName = messageText;
+                    userState.Step = RegistrationStep.None;
 
-                    // 1. Уведомление участнику
-                    string successMsg = user.Language switch
+                    string successMsg = userState.Language switch
                     {
-                        "uz" => $"🎉 Муваффақиятли рўйхатдан ўтдингиз!\n\n👤 Исм: {user.FullName}\n📞 Рақам: {user.PhoneNumber}\n👥 Жамоа: {user.TeamName}",
-                        "en" => $"🎉 Registration successful!\n\n👤 Name: {user.FullName}\n📞 Phone: {user.PhoneNumber}\n👥 Team: {user.TeamName}",
-                        _ => $"🎉 Вы успешно зарегистрировались!\n\n👤 Имя: {user.FullName}\n📞 Номер: {user.PhoneNumber}\n👥 Команда: {user.TeamName}"
+                        "uz" => $"🎉 Муваффақиятли рўйхатдан ўтдингиз!\n\n👤 Исм: {userState.FullName}\n📞 Рақам: {userState.PhoneNumber}\n👥 Жамоа: {userState.TeamName}",
+                        "en" => $"🎉 Registration successful!\n\n👤 Name: {userState.FullName}\n📞 Phone: {userState.PhoneNumber}\n👥 Team: {userState.TeamName}",
+                        _ => $"🎉 Вы успешно зарегистрировались!\n\n👤 Имя: {userState.FullName}\n📞 Номер: {userState.PhoneNumber}\n👥 Команда: {userState.TeamName}"
                     };
-                    await botClient.SendMessage(chatId, successMsg, cancellationToken: cancellationToken);
+                    await botClient.SendMessage(chatIdMsg, successMsg, cancellationToken: cancellationToken);
 
-                    // 2. Отправка отчета администратору
                     if (AdminChatId != 0)
                     {
                         try
                         {
-                            string adminNotification = $"🚨 **Новый участник зарегистрировался!**\n\n👤 Имя: {user.FullName}\n📞 Телефон: {user.PhoneNumber}\n👥 Команда: {user.TeamName}\n💬 Telegram ID: `{chatId}`";
-                            await botClient.SendMessage(AdminChatId, adminNotification, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, cancellationToken: cancellationToken);
+                            string adminNotification = $"🚨 **Новый участник зарегистрировался!**\n\n👤 Имя: {userState.FullName}\n📞 Телефон: {userState.PhoneNumber}\n👥 Команда: {userState.TeamName}\n💬 Telegram ID: `{chatIdMsg}`";
+                            await botClient.SendMessage(AdminChatId, adminNotification, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
                         }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Ошибка отправки админу: {ex.Message}");
-                        }
+                        catch { }
                     }
 
-                    await SendMainMenu(botClient, chatId, user, cancellationToken);
+                    await SendMainMenu(botClient, chatIdMsg, userState, cancellationToken);
                     break;
             }
+        }
+
+        private static async Task SendSubscriptionPrompt(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
+        {
+            string text = user.Language switch
+            {
+                "uz" => "Ro'yxatdan o'tish uchun quyidagi kanal va sahifaga obuna bo'ling:",
+                "en" => "To register, please subscribe to our channel and page:",
+                _ => "Для регистрации подпишитесь на наш канал и страницу:"
+            };
+
+            var keyboard = new InlineKeyboardMarkup(new[]
+            {
+                new[] { InlineKeyboardButton.WithUrl("📢 Telegram канал", "https://t.me/ekologlar_kr") },
+                new[] { InlineKeyboardButton.WithUrl("📸 Instagram", "https://www.instagram.com/ekologlar_hareketi_qr?vrfl=emh1cW93Z21ibm54") },
+                new[] { InlineKeyboardButton.WithCallbackData(user.Language == "uz" ? "✅ Obunani tekshirish" : user.Language == "en" ? "✅ Check Subscription" : "✅ Проверить подписку", "check_subscription") }
+            });
+
+            await botClient.SendMessage(chatId, text, replyMarkup: keyboard, cancellationToken: cancellationToken);
         }
 
         private static async Task SendLanguageMenu(ITelegramBotClient botClient, long chatId, CancellationToken cancellationToken)
@@ -259,29 +321,20 @@ namespace TelegramBot
 
         private static async Task SendSocialMediaMenu(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
         {
-            string tg1Text = user.Language switch { "uz" => "📢 Telegram 1-guruh", "en" => "📢 Telegram Group 1", _ => "📢 Telegram 1-группа" };
-            string tg2Text = user.Language switch { "uz" => "📢 Telegram 2-guruh", "en" => "📢 Telegram Group 2", _ => "📢 Telegram 2-группа" };
-            string instaText = user.Language switch { "uz" => "📸 Instagram sahifamiz", "en" => "📸 Instagram Page", _ => "📸 Instagram аккаунт" };
-
-            string subscribeText = user.Language switch
-            {
-                "uz" => "🔗 Obuna bo'lish",
-                "en" => "🔗 Subscribe",
-                _ => "🔗 Подписаться"
-            };
+            string tgText = user.Language switch { "uz" => "📢 Telegram kanal", "en" => "📢 Telegram Channel", _ => "📢 Telegram канал" };
+            string instaText = user.Language switch { "uz" => "📸 Instagram sahifa", "en" => "📸 Instagram Page", _ => "📸 Instagram аккаунт" };
 
             var inlineKeyboard = new InlineKeyboardMarkup(new[]
             {
-                new[] { InlineKeyboardButton.WithUrl($"{tg1Text} ({subscribeText})", "https://t.me/Ecokomuz") },
-                new[] { InlineKeyboardButton.WithUrl($"{tg2Text} ({subscribeText})", "https://t.me/ekologlar_kr") },
-                new[] { InlineKeyboardButton.WithUrl($"{instaText} ({subscribeText})", "https://www.instagram.com/ekologlar_hareketi_qr?vrfl=emh1cW93Z21ibm54") }
+                new[] { InlineKeyboardButton.WithUrl(tgText, "https://t.me/ekologlar_kr") },
+                new[] { InlineKeyboardButton.WithUrl(instaText, "https://www.instagram.com/ekologlar_hareketi_qr?vrfl=emh1cW93Z21ibm54") }
             });
 
             string menuTitle = user.Language switch
             {
-                "uz" => "Bizning ijtimoiy tarmoqlarimizga obuna bo'ling:",
-                "en" => "Subscribe to our social networks:",
-                _ => "Подписывайтесь на наши социальные сети:"
+                "uz" => "Bizning ijtimoiy tarmoqlarimiz:",
+                "en" => "Our social networks:",
+                _ => "Наши социальные сети:"
             };
 
             await botClient.SendMessage(chatId, menuTitle, replyMarkup: inlineKeyboard, cancellationToken: cancellationToken);
