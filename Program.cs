@@ -32,10 +32,13 @@ namespace TelegramBot
     class Program
     {
         private static readonly ConcurrentDictionary<long, UserState> Users = new();
+        
+        // Твой личный Chat ID для уведомлений о новых регистрациях
+        private static readonly long AdminChatId = 8791726949; 
 
         static async Task Main(string[] args)
         {
-            // Открываем порт для Render, чтобы Web Service не выдавал ошибку таймаута
+            // Открываем порт для Render Web Service
             try
             {
                 var listener = new HttpListener();
@@ -46,7 +49,7 @@ namespace TelegramBot
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Порт не запущен (это нормально для локального ПК): {ex.Message}");
+                Console.WriteLine($"Порт не запущен (это нормально для ПК): {ex.Message}");
             }
 
             var token = Environment.GetEnvironmentVariable("BOT_TOKEN");
@@ -170,14 +173,22 @@ namespace TelegramBot
                     user.TeamName = messageText;
                     user.Step = RegistrationStep.None;
 
+                    // 1. Уведомление участнику
                     string successMsg = user.Language switch
                     {
                         "uz" => $"🎉 Муваффақиятли рўйхатдан ўтдингиз!\n\n👤 Исм: {user.FullName}\n📞 Рақам: {user.PhoneNumber}\n👥 Жамоа: {user.TeamName}",
                         "en" => $"🎉 Registration successful!\n\n👤 Name: {user.FullName}\n📞 Phone: {user.PhoneNumber}\n👥 Team: {user.TeamName}",
                         _ => $"🎉 Вы успешно зарегистрировались!\n\n👤 Имя: {user.FullName}\n📞 Номер: {user.PhoneNumber}\n👥 Команда: {user.TeamName}"
                     };
-
                     await botClient.SendMessage(chatId, successMsg, cancellationToken: cancellationToken);
+
+                    // 2. Отправка отчета администратору (тебе в личку)
+                    if (AdminChatId != 0)
+                    {
+                        string adminNotification = $"🚨 **Новый участник зарегистрировался!**\n\n👤 Имя: {user.FullName}\n📞 Телефон: {user.PhoneNumber}\n👥 Команда: {user.TeamName}\n💬 Telegram ID: `{chatId}`";
+                        await botClient.SendMessage(AdminChatId, adminNotification, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, cancellationToken: cancellationToken);
+                    }
+
                     await SendMainMenu(botClient, chatId, user, cancellationToken);
                     break;
             }
