@@ -1,12 +1,13 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
-COPY TelegramBot.csproj ./
-RUN dotnet restore TelegramBot.csproj
+# Копируем абсолютно весь проект
+COPY . .
 
-COPY . ./
-RUN dotnet publish TelegramBot.csproj -c Release -o /app/publish
+# Сразу собираем и публикуем без лишних команд restore
+RUN dotnet publish -c Release -o /app/publish
 
+# Берем легкий образ для запуска
 FROM mcr.microsoft.com/dotnet/runtime:8.0 AS final
 WORKDIR /app
 COPY --from=build /app/publish .
