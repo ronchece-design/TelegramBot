@@ -1,5 +1,4 @@
 ﻿using System;
-using System;
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -12,7 +11,6 @@ using Telegram.Bot.Types.ReplyMarkups;
 
 namespace TelegramBot
 {
-    // Шаги регистрации
     public enum RegistrationStep
     {
         None,
@@ -21,10 +19,9 @@ namespace TelegramBot
         AwaitingTeamName
     }
 
-    // Состояние пользователя
     public class UserState
     {
-        public string Language { get; set; } = "ru"; // "ru", "uz", "en"
+        public string Language { get; set; } = "ru";
         public RegistrationStep Step { get; set; } = RegistrationStep.None;
         public string FullName { get; set; } = "";
         public string PhoneNumber { get; set; } = "";
@@ -53,15 +50,13 @@ namespace TelegramBot
             };
 
             botClient.StartReceiving(
-                updateHandler: HandleUpdateAsync,
-                pollingErrorHandler: HandlePollingErrorAsync,
-                receiverOptions: receiverOptions,
-                cancellationToken: cts.Token
+                HandleUpdateAsync,
+                HandlePollingErrorAsync,
+                receiverOptions,
+                cts.Token
             );
 
             Console.WriteLine("Бот успешно запущен и работает!");
-
-            // Зависаем в бесконечном ожидании, чтобы контейнер в Render НЕ завершал работу
             await Task.Delay(-1, cts.Token);
         }
 
@@ -73,7 +68,6 @@ namespace TelegramBot
             long chatId = message.Chat.Id;
             var user = Users.GetOrAdd(chatId, _ => new UserState());
 
-            // Обработка стартовой команды /start или смены языка
             if (messageText == "/start" || messageText == "🌐 Выбрать язык / Tilingizni tanlang / Choose language")
             {
                 user.Step = RegistrationStep.None;
@@ -81,7 +75,6 @@ namespace TelegramBot
                 return;
             }
 
-            // Выбор языка
             if (messageText is "Русский 🇷🇺" or "O'zbekcha 🇺🇿" or "English 🇬🇧")
             {
                 user.Language = messageText switch
@@ -95,13 +88,12 @@ namespace TelegramBot
                 return;
             }
 
-            // Обработка кнопки Регистрация
             if (messageText is "Регистрация" or "Ro'yxatdan o'tish" or "Registration")
             {
                 user.Step = RegistrationStep.AwaitingName;
                 string prompt = user.Language switch
                 {
-                    "uz" => "Имя и фамилия киргизинг (масалан: Иван Иванов):",
+                    "uz" => "Исм ва фамилиянгизни киритинг (масалан: Иван Иванов):",
                     "en" => "Please enter your Name and Surname (e.g. John Doe):",
                     _ => "Введите ваше Имя и Фамилию (например: Иван Иванов):"
                 };
@@ -109,12 +101,11 @@ namespace TelegramBot
                 return;
             }
 
-            // Обработка кнопки Помощь
             if (messageText is "Помощь" or "Yordam" or "Help")
             {
                 string helpText = user.Language switch
                 {
-                    "uz" => "📞 Помощь / Yordam:\nТелефон: +998 90 379 29 39\nTelegram: @ronchece",
+                    "uz" => "📞 Yordam:\nTelefon: +998 90 379 29 39\nTelegram: @ronchece",
                     "en" => "📞 Help:\nPhone: +998 90 379 29 39\nTelegram: @ronchece",
                     _ => "📞 Помощь:\nТелефон: +998 90 379 29 39\nTelegram: @ronchece"
                 };
@@ -122,7 +113,6 @@ namespace TelegramBot
                 return;
             }
 
-            // Пошаговый процесс регистрации
             switch (user.Step)
             {
                 case RegistrationStep.AwaitingName:
@@ -130,7 +120,7 @@ namespace TelegramBot
                     user.Step = RegistrationStep.AwaitingPhone;
                     string phonePrompt = user.Language switch
                     {
-                        "uz" => "Телефон рақамингизни шаклда киритинг: +998 xx xxx xx xx",
+                        "uz" => "Телефон рақамингизни шу форматда киритинг: +998 хх ххх хх хх",
                         "en" => "Enter your phone number in the format: +998 xx xxx xx xx",
                         _ => "Введите номер телефона в формате: +998 хх ххх хх хх"
                     };
@@ -138,12 +128,11 @@ namespace TelegramBot
                     break;
 
                 case RegistrationStep.AwaitingPhone:
-                    // Простая проверка формата телефона
                     if (!Regex.IsMatch(messageText, @"^\+998\s?\d{2}\s?\d{3}\s?\d{2}\s?\d{2}$"))
                     {
                         string errorPhone = user.Language switch
                         {
-                            "uz" => "Формат нотоғри! Илтимос, номерни +998 хх ххх хх хх форматида киритинг:",
+                            "uz" => "Формат нотўғри! Илтимос, рақамни +998 хх ххх хх хх форматида киритинг:",
                             "en" => "Invalid format! Please enter phone number in format +998 xx xxx xx xx:",
                             _ => "Неверный формат! Введите номер строго в формате +998 хх ххх хх хх:"
                         };
@@ -168,7 +157,7 @@ namespace TelegramBot
 
                     string successMsg = user.Language switch
                     {
-                        "uz" => $"🎉 Ro'yxatdan o'tdingiz!\n\n👤 Исм: {user.FullName}\n📞 Номер: {user.PhoneNumber}\n👥 Жамоа: {user.TeamName}",
+                        "uz" => $"🎉 Муваффақиятли рўйхатдан ўтдингиз!\n\n👤 Исм: {user.FullName}\n📞 Рақам: {user.PhoneNumber}\n👥 Жамоа: {user.TeamName}",
                         "en" => $"🎉 Registration successful!\n\n👤 Name: {user.FullName}\n📞 Phone: {user.PhoneNumber}\n👥 Team: {user.TeamName}",
                         _ => $"🎉 Вы успешно зарегистрировались!\n\n👤 Имя: {user.FullName}\n📞 Номер: {user.PhoneNumber}\n👥 Команда: {user.TeamName}"
                     };
@@ -208,7 +197,7 @@ namespace TelegramBot
 
             string text = user.Language switch
             {
-                "uz" => "Бош меню. Кракли бўлимни танланг:",
+                "uz" => "Асосий меню. Керакли бўлимни танланг:",
                 "en" => "Main Menu. Choose an option:",
                 _ => "Главное меню. Выберите нужный раздел:"
             };
@@ -218,13 +207,7 @@ namespace TelegramBot
 
         private static Task HandlePollingErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
         {
-            var errorMessage = exception switch
-            {
-                ApiRequestException apiRequestException => $"Telegram API Error:\n[{apiRequestException.ErrorCode}]\n{apiRequestException.Message}",
-                _ => exception.ToString()
-            };
-
-            Console.WriteLine(errorMessage);
+            Console.WriteLine(exception.ToString());
             return Task.CompletedTask;
         }
     }
