@@ -25,7 +25,7 @@ namespace TelegramBot
         public string Language { get; set; } = "ru";
         public RegistrationStep Step { get; set; } = RegistrationStep.None;
         public string FullName { get; set; } = "";
-        public string PhoneNumber { get; set: } = "";
+        public string PhoneNumber { get; set; } = "";
         public string TeamName { get; set; } = "";
     }
 
@@ -38,14 +38,24 @@ namespace TelegramBot
 
         static async Task Main(string[] args)
         {
-            // Открываем порт для Render Web Service
+            // Открываем порт для Render Web Service, чтобы сервер не закрывал процесс
             try
             {
                 var listener = new HttpListener();
                 int port = int.Parse(Environment.GetEnvironmentVariable("PORT") ?? "8080");
                 listener.Prefixes.Add($"http://*:{port}/");
                 listener.Start();
-                Task.Run(async () => { while (true) { var ctx = await listener.GetContextAsync(); ctx.Response.Close(); } });
+                Task.Run(async () => { 
+                    while (true) 
+                    { 
+                        try 
+                        { 
+                            var ctx = await listener.GetContextAsync(); 
+                            ctx.Response.Close(); 
+                        } 
+                        catch { } 
+                    } 
+                });
             }
             catch (Exception ex)
             {
@@ -131,7 +141,7 @@ namespace TelegramBot
                 return;
             }
 
-            // Обработка кнопки "Мы в социальной сети" на всех языках
+            // Обработка кнопки социальных сетей
             if (messageText is "📱 Мы в социальной сети" or "📱 Ijtimoiy tarmoqlardamiz" or "📱 Social Networks")
             {
                 await SendSocialMediaMenu(botClient, chatId, user, cancellationToken);
@@ -192,8 +202,15 @@ namespace TelegramBot
                     // 2. Отправка отчета администратору
                     if (AdminChatId != 0)
                     {
-                        string adminNotification = $"🚨 **Новый участник зарегистрировался!**\n\n👤 Имя: {user.FullName}\n📞 Телефон: {user.PhoneNumber}\n👥 Команда: {user.TeamName}\n💬 Telegram ID: `{chatId}`";
-                        await botClient.SendMessage(AdminChatId, adminNotification, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, cancellationToken: cancellationToken);
+                        try
+                        {
+                            string adminNotification = $"🚨 **Новый участник зарегистрировался!**\n\n👤 Имя: {user.FullName}\n📞 Телефон: {user.PhoneNumber}\n👥 Команда: {user.TeamName}\n💬 Telegram ID: `{chatId}`";
+                            await botClient.SendMessage(AdminChatId, adminNotification, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, cancellationToken: cancellationToken);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Ошибка отправки админу: {ex.Message}");
+                        }
                     }
 
                     await SendMainMenu(botClient, chatId, user, cancellationToken);
@@ -248,14 +265,14 @@ namespace TelegramBot
 
             string subscribeText = user.Language switch
             {
-                "uz" => "🔗 Obuna bo'lish:",
-                "en" => "🔗 Subscribe:",
-                _ => "🔗 Подписаться:"
+                "uz" => "🔗 Obuna bo'lish",
+                "en" => "🔗 Subscribe",
+                _ => "🔗 Подписаться"
             };
 
             var inlineKeyboard = new InlineKeyboardMarkup(new[]
             {
-                new[] { InlineKeyboardButton.WithUrl($"{tg1Text} ({subscribeText})", "https://t.me/yosh_ekologlarharakati") },
+                new[] { InlineKeyboardButton.WithUrl($"{tg1Text} ({subscribeText})", "https://t.me/Ecokomuz") },
                 new[] { InlineKeyboardButton.WithUrl($"{tg2Text} ({subscribeText})", "https://t.me/ekologlar_kr") },
                 new[] { InlineKeyboardButton.WithUrl($"{instaText} ({subscribeText})", "https://www.instagram.com/ekologlar_hareketi_qr?vrfl=emh1cW93Z21ibm54") }
             });
