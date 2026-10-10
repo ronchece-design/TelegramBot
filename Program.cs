@@ -25,7 +25,7 @@ namespace TelegramBot
         public string Language { get; set; } = "ru";
         public RegistrationStep Step { get; set; } = RegistrationStep.None;
         public string FullName { get; set; } = "";
-        public string PhoneNumber { get; set; } = "";
+        public string PhoneNumber { get; set: } = "";
         public string TeamName { get; set; } = "";
     }
 
@@ -131,6 +131,13 @@ namespace TelegramBot
                 return;
             }
 
+            // Обработка кнопки "Мы в социальной сети" на всех языках
+            if (messageText is "📱 Мы в социальной сети" or "📱 Ijtimoiy tarmoqlardamiz" or "📱 Social Networks")
+            {
+                await SendSocialMediaMenu(botClient, chatId, user, cancellationToken);
+                return;
+            }
+
             switch (user.Step)
             {
                 case RegistrationStep.AwaitingName:
@@ -182,7 +189,7 @@ namespace TelegramBot
                     };
                     await botClient.SendMessage(chatId, successMsg, cancellationToken: cancellationToken);
 
-                    // 2. Отправка отчета администратору (тебе в личку)
+                    // 2. Отправка отчета администратору
                     if (AdminChatId != 0)
                     {
                         string adminNotification = $"🚨 **Новый участник зарегистрировался!**\n\n👤 Имя: {user.FullName}\n📞 Телефон: {user.PhoneNumber}\n👥 Команда: {user.TeamName}\n💬 Telegram ID: `{chatId}`";
@@ -211,10 +218,12 @@ namespace TelegramBot
         {
             string regBtn = user.Language switch { "uz" => "Ro'yxatdan o'tish", "en" => "Registration", _ => "Регистрация" };
             string helpBtn = user.Language switch { "uz" => "Yordam", "en" => "Help", _ => "Помощь" };
+            string socialBtn = user.Language switch { "uz" => "📱 Ijtimoiy tarmoqlardamiz", "en" => "📱 Social Networks", _ => "📱 Мы в социальной сети" };
 
             var keyboard = new ReplyKeyboardMarkup(new[]
             {
                 new KeyboardButton[] { regBtn, helpBtn },
+                new KeyboardButton[] { socialBtn },
                 new KeyboardButton[] { "🌐 Выбрать язык / Tilingizni tanlang / Choose language" }
             })
             {
@@ -229,6 +238,36 @@ namespace TelegramBot
             };
 
             await botClient.SendMessage(chatId, text, replyMarkup: keyboard, cancellationToken: cancellationToken);
+        }
+
+        private static async Task SendSocialMediaMenu(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
+        {
+            string tg1Text = user.Language switch { "uz" => "📢 Telegram 1-guruh", "en" => "📢 Telegram Group 1", _ => "📢 Telegram 1-группа" };
+            string tg2Text = user.Language switch { "uz" => "📢 Telegram 2-guruh", "en" => "📢 Telegram Group 2", _ => "📢 Telegram 2-группа" };
+            string instaText = user.Language switch { "uz" => "📸 Instagram sahifamiz", "en" => "📸 Instagram Page", _ => "📸 Instagram аккаунт" };
+
+            string subscribeText = user.Language switch
+            {
+                "uz" => "🔗 Obuna bo'lish:",
+                "en" => "🔗 Subscribe:",
+                _ => "🔗 Подписаться:"
+            };
+
+            var inlineKeyboard = new InlineKeyboardMarkup(new[]
+            {
+                new[] { InlineKeyboardButton.WithUrl($"{tg1Text} ({subscribeText})", "https://t.me/yosh_ekologlarharakati") },
+                new[] { InlineKeyboardButton.WithUrl($"{tg2Text} ({subscribeText})", "https://t.me/ekologlar_kr") },
+                new[] { InlineKeyboardButton.WithUrl($"{instaText} ({subscribeText})", "https://www.instagram.com/ekologlar_hareketi_qr?vrfl=emh1cW93Z21ibm54") }
+            });
+
+            string menuTitle = user.Language switch
+            {
+                "uz" => "Bizning ijtimoiy tarmoqlarimizga obuna bo'ling:",
+                "en" => "Subscribe to our social networks:",
+                _ => "Подписывайтесь на наши социальные сети:"
+            };
+
+            await botClient.SendMessage(chatId, menuTitle, replyMarkup: inlineKeyboard, cancellationToken: cancellationToken);
         }
 
         private static Task HandlePollingErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
