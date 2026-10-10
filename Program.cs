@@ -20,7 +20,8 @@ namespace TelegramBot
         None,
         AwaitingName,
         AwaitingPhone,
-        AwaitingTeamName
+        AwaitingTeamName,
+        AwaitingSecretCode
     }
 
     public class UserState
@@ -31,13 +32,14 @@ namespace TelegramBot
         public string FullName { get; set; } = "";
         public string PhoneNumber { get; set; } = "";
         public string TeamId { get; set; } = "";
-        public string PendingTeamId { get; set; } = ""; // Запоминаем команду при переходе по ссылке
+        public string PendingTeamId { get; set; } = ""; // Запоминаем команду при переходе по ссылке или коду
         public bool IsLeader { get; set; } = false;
     }
 
     public class TeamModel
     {
         public string TeamId { get; set; } = "";
+        public string SecretCode { get; set; } = "";
         public string Name { get; set; } = "";
         public long LeaderChatId { get; set; }
         public List<long> Members { get; set; } = new();
@@ -46,7 +48,8 @@ namespace TelegramBot
     class Program
     {
         private static readonly ConcurrentDictionary<long, UserState> Users = new();
-        private static readonly ConcurrentDictionary<string, TeamModel> Teams = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, TeamModel> TeamsByCode = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, TeamModel> TeamsById = new(StringComparer.OrdinalIgnoreCase);
         
         // Твой личный Chat ID для уведомлений
         private static readonly long AdminChatId = 8791726949; 
@@ -170,7 +173,7 @@ namespace TelegramBot
             long chatIdMsg = message.Chat.Id;
             var userState = Users.GetOrAdd(chatIdMsg, _ => new UserState { ChatId = chatIdMsg });
 
-            // Обработка /start с аргументами ссылки (напр. /start team_123)
+            // Обработка /start с аргументами ссылки
             if (messageText.StartsWith("/start"))
             {
                 userState.Step = RegistrationStep.None;
@@ -178,7 +181,7 @@ namespace TelegramBot
                 if (parts.Length > 1 && parts[1].StartsWith("team_"))
                 {
                     string targetTeamId = parts[1].Replace("team_", "");
-                    if (Teams.ContainsKey(targetTeamId))
+                    if (TeamsById.ContainsKey(targetTeamId))
                     {
                         userState.PendingTeamId = targetTeamId;
                     }
@@ -228,6 +231,34 @@ namespace TelegramBot
                 return;
             }
 
+            if (messageText is "🔗 Присоединиться по коду" or "🔗 Kod arqalı qosılıw" or "🔗 Kod orqali qo'shilish" or "🔗 Join by Code")
+            {
+                if (!string.IsNullOrEmpty(userState.TeamId))
+                {
+                    string alreadyInTeam = userState.Language switch
+                    {
+                        "qr" => "Siz aldın-ala komandag'a a'zo bolg'ansız!",
+                        "uz" => "Siz allaqachon jamoaga a'zosiz!",
+                        "en" => "You are already in a team!",
+                        _ => "Вы уже состоите в команде!"
+                    };
+                    await botClient.SendMessage(chatIdMsg, alreadyInTeam, cancellationToken: cancellationToken);
+                    return;
+                }
+
+                userState.IsLeader = false;
+                userState.Step = RegistrationStep.AwaitingSecretCode;
+                string enterCodePrompt = userState.Language switch
+                {
+                    "qr" => "Komandanın' jasırın kodın kiritiń:",
+                    "uz" => "Jamoaning maxfiy kodini kiriting:",
+                    "en" => "Enter the secret team code:",
+                    _ => "Введите секретный код команды:"
+                };
+                await botClient.SendMessage(chatIdMsg, enterCodePrompt, cancellationToken: cancellationToken);
+                return;
+            }
+
             if (messageText is "👥 Моя команда" or "👥 Mening jamoam" or "👥 My Team" or "👥 Benim komandam")
             {
                 await ShowMyTeamInfo(botClient, chatIdMsg, userState, cancellationToken);
@@ -256,6 +287,27 @@ namespace TelegramBot
             // Шаги регистрации
             switch (userState.Step)
             {
+                case RegistrationStep.AwaitingSecretCode:
+                    string inputCode = messageText.Trim().ToUpper();
+                    if (TeamsByCode.TryGetValue(inputCode, out var foundTeam))
+                    {
+                        userState.PendingTeamId = foundTeam.TeamId;
+                        userState.Step = RegistrationStep.None;
+                        await SendSubscriptionPrompt(botClient, chatIdMsg, userState, cancellationToken);
+                    }
+                    else
+                    {
+                        string invalidCode = userState.Language switch
+                        {
+                            "qr" => "❌ Nadurıs kod! Iltimas, kodtı qayta kiritiń:",
+                            "uz" => "❌ Noto'g'ri kod! Iltimos, kodni qayta kiriting:",
+                            "en" => "❌ Invalid code! Please enter the code again:",
+                            _ => "❌ Неверный секретный код! Пожалуйста, проверьте и введите снова:"
+                        };
+                        await botClient.SendMessage(chatIdMsg, invalidCode, cancellationToken: cancellationToken);
+                    }
+                    break;
+
                 case RegistrationStep.AwaitingName:
                     userState.FullName = messageText;
                     userState.Step = RegistrationStep.AwaitingPhone;
@@ -297,11 +349,14 @@ namespace TelegramBot
                         };
                         await botClient.SendMessage(chatIdMsg, teamPrompt, cancellationToken: cancellationToken);
                     }
-                    else if (!string.IsNullOrEmpty(userState.PendingTeamId) && Teams.TryGetValue(userState.PendingTeamId, out var targetTeam))
+                    else if (!string.IsNullOrEmpty(userState.PendingTeamId) && TeamsById.TryGetValue(userState.PendingTeamId, out var targetTeam))
                     {
-                        // Регистрация участника по ссылке
+                        // Регистрация участника
                         userState.TeamId = targetTeam.TeamId;
-                        targetTeam.Members.Add(chatIdMsg);
+                        if (!targetTeam.Members.Contains(chatIdMsg))
+                        {
+                            targetTeam.Members.Add(chatIdMsg);
+                        }
                         userState.Step = RegistrationStep.None;
 
                         string joinedMsg = userState.Language switch
@@ -335,8 +390,8 @@ namespace TelegramBot
                 case RegistrationStep.AwaitingTeamName:
                     string desiredTeamName = messageText.Trim();
 
-                    // Проверка занятости названия
-                    bool exists = Teams.Values.Any(t => t.Name.Equals(desiredTeamName, StringComparison.OrdinalIgnoreCase));
+                    // Проверка уникальности названия команды
+                    bool exists = TeamsById.Values.Any(t => t.Name.Equals(desiredTeamName, StringComparison.OrdinalIgnoreCase));
                     if (exists)
                     {
                         string nameTaken = userState.Language switch
@@ -350,17 +405,22 @@ namespace TelegramBot
                         return;
                     }
 
-                    // Создание команды
+                    // Генерация секретного кода из 6 символов
+                    string secretCode = Guid.NewGuid().ToString("N").Substring(0, 6).ToUpper();
                     string newTeamId = Guid.NewGuid().ToString("N").Substring(0, 8);
+
                     var newTeam = new TeamModel
                     {
                         TeamId = newTeamId,
+                        SecretCode = secretCode,
                         Name = desiredTeamName,
                         LeaderChatId = chatIdMsg,
                         Members = new List<long> { chatIdMsg }
                     };
 
-                    Teams[newTeamId] = newTeam;
+                    TeamsById[newTeamId] = newTeam;
+                    TeamsByCode[secretCode] = newTeam;
+
                     userState.TeamId = newTeamId;
                     userState.Step = RegistrationStep.None;
 
@@ -369,10 +429,10 @@ namespace TelegramBot
 
                     string successLeaderMsg = userState.Language switch
                     {
-                        "qr" => $"🎉 Komandag'a basshı bolıp dizimnen o'ttińiz!\n\n👥 Komanda: {newTeam.Name}\n👤 Atı: {userState.FullName}\n📞 Nomeri: {userState.PhoneNumber}\n\n🔗 Agzalardı chaqırıw ushın siltewiniz:\n`{inviteLink}`",
-                        "uz" => $"🎉 Jamoa sardori sifatida ro'yxatdan o'tdingiz!\n\n👥 Jamoa: {newTeam.Name}\n👤 Ism: {userState.FullName}\n📞 Raqam: {userState.PhoneNumber}\n\n🔗 A'zolarni taklif qilish havolasi:\n`{inviteLink}`",
-                        "en" => $"🎉 Registered as Team Captain!\n\n👥 Team: {newTeam.Name}\n👤 Name: {userState.FullName}\n📞 Phone: {userState.PhoneNumber}\n\n🔗 Invite link for team members:\n`{inviteLink}`",
-                        _ => $"🎉 Вы успешно зарегистрировали команду как капитан!\n\n👥 Команда: {newTeam.Name}\n👤 Имя: {userState.FullName}\n📞 Номер: {userState.PhoneNumber}\n\n🔗 Пригласительная ссылка для вашей команды:\n`{inviteLink}`"
+                        "qr" => $"🎉 Komandag'a basshı bolıp dizimnen o'ttińiz!\n\n👥 Komanda: {newTeam.Name}\n🔐 Jasırın kod: `{secretCode}`\n👤 Atı: {userState.FullName}\n📞 Nomeri: {userState.PhoneNumber}\n\n🔗 Agzalardı chaqırıw ushın siltewiniz:\n`{inviteLink}`",
+                        "uz" => $"🎉 Jamoa sardori sifatida ro'yxatdan o'tdingiz!\n\n👥 Jamoa: {newTeam.Name}\n🔐 Maxfiy kod: `{secretCode}`\n👤 Ism: {userState.FullName}\n📞 Raqam: {userState.PhoneNumber}\n\n🔗 A'zolarni taklif qilish havolasi:\n`{inviteLink}`",
+                        "en" => $"🎉 Registered as Team Captain!\n\n👥 Team: {newTeam.Name}\n🔐 Secret code: `{secretCode}`\n👤 Name: {userState.FullName}\n📞 Phone: {userState.PhoneNumber}\n\n🔗 Invite link for team members:\n`{inviteLink}`",
+                        _ => $"🎉 Вы успешно зарегистрировали команду как капитан!\n\n👥 Команда: {newTeam.Name}\n🔐 Секретный код: `{secretCode}`\n👤 Имя: {userState.FullName}\n📞 Номер: {userState.PhoneNumber}\n\n🔗 Пригласительная ссылка для вашей команды:\n`{inviteLink}`"
                     };
 
                     await botClient.SendMessage(chatIdMsg, successLeaderMsg, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
@@ -382,7 +442,7 @@ namespace TelegramBot
                     {
                         try
                         {
-                            string adminNotification = $"🚨 **Создана новая команда!**\n\n👥 Команда: {newTeam.Name}\n👑 Капитан: {userState.FullName}\n📞 Телефон: {userState.PhoneNumber}";
+                            string adminNotification = $"🚨 **Создана новая команда!**\n\n👥 Команда: {newTeam.Name}\n🔐 Код: `{secretCode}`\n👑 Капитан: {userState.FullName}\n📞 Телефон: {userState.PhoneNumber}";
                             await botClient.SendMessage(AdminChatId, adminNotification, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
                         }
                         catch { }
@@ -395,7 +455,7 @@ namespace TelegramBot
 
         private static async Task ShowMyTeamInfo(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
         {
-            if (string.IsNullOrEmpty(user.TeamId) || !Teams.TryGetValue(user.TeamId, out var team))
+            if (string.IsNullOrEmpty(user.TeamId) || !TeamsById.TryGetValue(user.TeamId, out var team))
             {
                 string noTeam = user.Language switch
                 {
@@ -423,7 +483,7 @@ namespace TelegramBot
                 }
             }
 
-            string info = $"👥 **Команда:** {team.Name}\n\n**Участники ({team.Members.Count}):**\n{memberList}\n🔗 **Ссылка для приглашения:**\n`{inviteLink}`";
+            string info = $"👥 **Команда:** {team.Name}\n🔐 **Секретный код:** `{team.SecretCode}`\n\n**Участники ({team.Members.Count}):**\n{memberList}\n🔗 **Ссылка для приглашения:**\n`{inviteLink}`";
             await botClient.SendMessage(chatId, info, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
         }
 
@@ -472,6 +532,7 @@ namespace TelegramBot
         private static async Task SendMainMenu(ITelegramBotClient botClient, long chatId, UserState user, CancellationToken cancellationToken)
         {
             string createTeamBtn = user.Language switch { "qr" => "➕ Komanda dözetip", "uz" => "➕ Jamoa yaratish", "en" => "➕ Create Team", _ => "➕ Создать команду" };
+            string joinTeamBtn = user.Language switch { "qr" => "🔗 Kod arqalı qosılıw", "uz" => "🔗 Kod orqali qo'shilish", "en" => "🔗 Join by Code", _ => "🔗 Присоединиться по коду" };
             string myTeamBtn = user.Language switch { "qr" => "👥 Benim komandam", "uz" => "👥 Mening jamoam", "en" => "👥 My Team", _ => "👥 Моя команда" };
             string helpBtn = user.Language switch { "qr" => "Anıqlama", "uz" => "Yordam", "en" => "Help", _ => "Помощь" };
             string socialBtn = user.Language switch { "qr" => "📱 Biz sociallıq tarmaqlarda", "uz" => "📱 Ijtimoiy tarmoqlardamiz", "en" => "📱 Social Networks", _ => "📱 Мы в социальной сети" };
@@ -480,14 +541,15 @@ namespace TelegramBot
 
             if (string.IsNullOrEmpty(user.TeamId))
             {
-                keyboardList.Add(new KeyboardButton[] { createTeamBtn, helpBtn });
+                keyboardList.Add(new KeyboardButton[] { createTeamBtn, joinTeamBtn });
+                keyboardList.Add(new KeyboardButton[] { helpBtn, socialBtn });
             }
             else
             {
                 keyboardList.Add(new KeyboardButton[] { myTeamBtn, helpBtn });
+                keyboardList.Add(new KeyboardButton[] { socialBtn });
             }
 
-            keyboardList.Add(new KeyboardButton[] { socialBtn });
             keyboardList.Add(new KeyboardButton[] { "🌐 Выбрать язык / Tilingizni tanlang / Choose language" });
 
             var keyboard = new ReplyKeyboardMarkup(keyboardList) { ResizeKeyboard = true };
