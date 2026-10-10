@@ -48,7 +48,7 @@ namespace TelegramBot
                 int port = int.Parse(Environment.GetEnvironmentVariable("PORT") ?? "8080");
                 listener.Prefixes.Add($"http://*:{port}/");
                 listener.Start();
-                Task.Run(async () => { 
+                _ = Task.Run(async () => { 
                     while (true) 
                     { 
                         try 
@@ -104,7 +104,7 @@ namespace TelegramBot
                     bool isSubscribed = false;
                     try
                     {
-                        var member = await botClient.GetChatMemberAsync(RequiredChannel, chatId, cancellationToken);
+                        var member = await botClient.GetChatMember(RequiredChannel, chatId, cancellationToken);
                         if (member.Status is ChatMemberStatus.Member or ChatMemberStatus.Administrator or ChatMemberStatus.Creator)
                         {
                             isSubscribed = true;
@@ -112,7 +112,7 @@ namespace TelegramBot
                     }
                     catch
                     {
-                        isSubscribed = true; // Если бот не админ в канале, временно пропускаем
+                        isSubscribed = true; // Если бот не админ в канале, пропускаем
                     }
 
                     if (isSubscribed)
