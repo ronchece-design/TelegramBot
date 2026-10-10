@@ -23,7 +23,9 @@ namespace TelegramBot
         AwaitingName,
         AwaitingPhone,
         AwaitingTeamName,
-        AwaitingSecretCode
+        AwaitingSecretCode,
+        EditName,
+        EditPhone
     }
 
     public class UserState
@@ -36,6 +38,7 @@ namespace TelegramBot
         public string TeamId { get; set; } = "";
         public string PendingTeamId { get; set; } = "";
         public bool IsLeader { get; set; } = false;
+        public bool IsBanned { get; set; } = false;
     }
 
     public class TeamModel
@@ -45,6 +48,8 @@ namespace TelegramBot
         public string Name { get; set; } = "";
         public long LeaderChatId { get; set; }
         public List<long> Members { get; set; } = new();
+        public bool IsFinalized { get; set; } = false;
+        public int MaxMembers { get; set; } = 5;
     }
 
     class Program
@@ -52,6 +57,7 @@ namespace TelegramBot
         private static readonly ConcurrentDictionary<long, UserState> Users = new();
         private static readonly ConcurrentDictionary<string, TeamModel> TeamsByCode = new(StringComparer.OrdinalIgnoreCase);
         private static readonly ConcurrentDictionary<string, TeamModel> TeamsById = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentBag<long> BannedUserIds = new();
         
         private static readonly long AdminChatId = 8791726949; 
         private static readonly string RequiredChannel = "@ekologlar_kr";
@@ -114,6 +120,48 @@ namespace TelegramBot
                 long chatId = callbackQuery.Message!.Chat.Id;
                 var user = Users.GetOrAdd(chatId, _ => new UserState { ChatId = chatId });
 
+                if (user.IsBanned || BannedUserIds.Contains(chatId))
+                {
+                    await botClient.AnswerCallbackQuery(callbackQuery.Id, "⛔ Вы заблокированы и не можете использовать бота.", showAlert: true, cancellationToken: cancellationToken);
+                    return;
+                }
+
+                if (callbackQuery.Data.StartsWith("kick_"))
+                {
+                    long targetId = long.Parse(callbackQuery.Data.Replace("kick_", ""));
+                    if (!string.IsNullOrEmpty(user.TeamId) && TeamsById.TryGetValue(user.TeamId, out var team) && team.LeaderChatId == chatId)
+                    {
+                        if (targetId != chatId)
+                        {
+                            team.Members.Remove(targetId);
+                            if (Users.TryGetValue(targetId, out var targetUser))
+                            {
+                                targetUser.TeamId = "";
+                                try
+                                {
+                                    await botClient.SendMessage(targetId, "⚠️ Капитан исключил вас из команды.", cancellationToken: cancellationToken);
+                                    await SendMainMenu(botClient, targetId, targetUser, cancellationToken);
+                                }
+                                catch { }
+                            }
+                            await botClient.AnswerCallbackQuery(callbackQuery.Id, "✅ Участник исключен!", cancellationToken: cancellationToken);
+                            await ShowMyTeamInfo(botClient, chatId, user, cancellationToken);
+                        }
+                    }
+                    return;
+                }
+
+                if (callbackQuery.Data == "finalize_team")
+                {
+                    if (!string.IsNullOrEmpty(user.TeamId) && TeamsById.TryGetValue(user.TeamId, out var team) && team.LeaderChatId == chatId)
+                    {
+                        team.IsFinalized = true;
+                        await botClient.AnswerCallbackQuery(callbackQuery.Id, "✅ Состав команды зафиксирован!", showAlert: true, cancellationToken: cancellationToken);
+                        await ShowMyTeamInfo(botClient, chatId, user, cancellationToken);
+                    }
+                    return;
+                }
+
                 if (callbackQuery.Data == "check_subscription")
                 {
                     bool isSubscribed = false;
@@ -170,29 +218,121 @@ namespace TelegramBot
             long chatIdMsg = message.Chat.Id;
             var userState = Users.GetOrAdd(chatIdMsg, _ => new UserState { ChatId = chatIdMsg });
 
-            // Админ-команда экспорта в Excel (CSV)
-            if (messageText.StartsWith("/export") && chatIdMsg == AdminChatId)
+            // Проверка бана
+            if (userState.IsBanned || BannedUserIds.Contains(chatIdMsg))
             {
-                await ExportDataToAdmin(botClient, chatIdMsg, cancellationToken);
+                await botClient.SendMessage(chatIdMsg, "⛔ Вам заблокирован доступ к этому боту.", cancellationToken: cancellationToken);
                 return;
             }
 
-            // Админ-рассылка: /broadcast Текст сообщения
-            if (messageText.StartsWith("/broadcast ") && chatIdMsg == AdminChatId)
+            // --- КОМАНДЫ АДМИНИСТРАТОРА ---
+            if (chatIdMsg == AdminChatId)
             {
-                string broadcastText = messageText.Substring(11).Trim();
-                int successCount = 0;
-                foreach (var kvp in Users)
+                if (messageText.StartsWith("/ban "))
                 {
-                    try
+                    string target = messageText.Substring(5).Trim();
+                    long targetId = 0;
+                    var targetUser = Users.Values.FirstOrDefault(u => u.PhoneNumber == target || u.ChatId.ToString() == target);
+                    if (targetUser != null) targetId = targetUser.ChatId;
+                    else long.TryParse(target, out targetId);
+
+                    if (targetId != 0)
                     {
-                        await botClient.SendMessage(kvp.Key, $"📢 **Объявление от организаторов:**\n\n{broadcastText}", parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
-                        successCount++;
+                        BannedUserIds.Add(targetId);
+                        if (Users.TryGetValue(targetId, out var u)) u.IsBanned = true;
+                        await botClient.SendMessage(chatIdMsg, $"⛔ Пользователь `{targetId}` успешно заблокирован!", parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
                     }
-                    catch { }
+                    else
+                    {
+                        await botClient.SendMessage(chatIdMsg, "❌ Пользователь не найден.", cancellationToken: cancellationToken);
+                    }
+                    return;
                 }
-                await botClient.SendMessage(chatIdMsg, $"✅ Рассылка завершена успешно! Получателей: {successCount}", cancellationToken: cancellationToken);
-                return;
+
+                if (messageText.StartsWith("/unban "))
+                {
+                    string target = messageText.Substring(7).Trim();
+                    long targetId = 0;
+                    var targetUser = Users.Values.FirstOrDefault(u => u.PhoneNumber == target || u.ChatId.ToString() == target);
+                    if (targetUser != null) targetId = targetUser.ChatId;
+                    else long.TryParse(target, out targetId);
+
+                    if (targetId != 0)
+                    {
+                        if (Users.TryGetValue(targetId, out var u)) u.IsBanned = false;
+                        await botClient.SendMessage(chatIdMsg, $"✅ Пользователь `{targetId}` разблокирован!", parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+                    }
+                    return;
+                }
+
+                if (messageText.StartsWith("/find "))
+                {
+                    string query = messageText.Substring(6).Trim().ToLower();
+                    var matchedTeams = TeamsById.Values.Where(t => t.Name.ToLower().Contains(query) || t.SecretCode.ToLower().Contains(query)).ToList();
+                    var matchedUsers = Users.Values.Where(u => u.FullName.ToLower().Contains(query) || u.PhoneNumber.Contains(query)).ToList();
+
+                    string result = $"🔍 **Результаты поиска по запросу «{query}»:**\n\n";
+                    result += $"👥 **Найдено команд:** {matchedTeams.Count}\n";
+                    foreach (var t in matchedTeams)
+                    {
+                        result += $"• Команда: {t.Name} (Код: `{t.SecretCode}`, Состав: {t.Members.Count}/{t.MaxMembers})\n";
+                    }
+
+                    result += $"\n👤 **Найдено участников:** {matchedUsers.Count}\n";
+                    foreach (var u in matchedUsers)
+                    {
+                        result += $"• {u.FullName} ({u.PhoneNumber}) — ID: `{u.ChatId}`\n";
+                    }
+
+                    await botClient.SendMessage(chatIdMsg, result, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+                    return;
+                }
+
+                if (messageText == "/stats")
+                {
+                    int totalUsers = Users.Values.Count(u => !string.IsNullOrEmpty(u.FullName));
+                    int totalTeams = TeamsById.Count;
+                    int ruCount = Users.Values.Count(u => u.Language == "ru");
+                    int uzCount = Users.Values.Count(u => u.Language == "uz");
+                    int qrCount = Users.Values.Count(u => u.Language == "qr");
+                    int enCount = Users.Values.Count(u => u.Language == "en");
+
+                    string stats = $"📊 **Детальная статистика бота:**\n\n" +
+                                   $"👥 Всего участников: {totalUsers}\n" +
+                                   $"🏆 Всего команд: {totalTeams}\n" +
+                                   $"⛔ Заблокировано: {BannedUserIds.Count}\n\n" +
+                                   $"🌐 **Статистика языков:**\n" +
+                                   $"🇷🇺 Русский: {ruCount}\n" +
+                                   $"🇺🇿 O'zbekcha: {uzCount}\n" +
+                                   $"🇰🇷 Qaraqalpaq: {qrCount}\n" +
+                                   $"🇬🇧 English: {enCount}";
+
+                    await botClient.SendMessage(chatIdMsg, stats, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+                    return;
+                }
+
+                if (messageText.StartsWith("/export"))
+                {
+                    await ExportDataToAdmin(botClient, chatIdMsg, cancellationToken);
+                    return;
+                }
+
+                if (messageText.StartsWith("/broadcast "))
+                {
+                    string broadcastText = messageText.Substring(11).Trim();
+                    int successCount = 0;
+                    foreach (var kvp in Users)
+                    {
+                        try
+                        {
+                            await botClient.SendMessage(kvp.Key, $"📢 **Объявление от организаторов:**\n\n{broadcastText}", parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+                            successCount++;
+                        }
+                        catch { }
+                    }
+                    await botClient.SendMessage(chatIdMsg, $"✅ Рассылка завершена успешно! Получателей: {successCount}", cancellationToken: cancellationToken);
+                    return;
+                }
             }
 
             if (messageText.StartsWith("/start"))
@@ -202,8 +342,13 @@ namespace TelegramBot
                 if (parts.Length > 1 && parts[1].StartsWith("team_"))
                 {
                     string targetTeamId = parts[1].Replace("team_", "");
-                    if (TeamsById.ContainsKey(targetTeamId))
+                    if (TeamsById.TryGetValue(targetTeamId, out var targetTeam))
                     {
+                        if (targetTeam.IsFinalized || targetTeam.Members.Count >= targetTeam.MaxMembers)
+                        {
+                            await botClient.SendMessage(chatIdMsg, "❌ Регистрация в эту команду закрыта или в ней достигнут лимит участников!", cancellationToken: cancellationToken);
+                            return;
+                        }
                         userState.PendingTeamId = targetTeamId;
                     }
                 }
@@ -243,6 +388,20 @@ namespace TelegramBot
                 };
                 userState.Step = RegistrationStep.None;
                 await SendMainMenu(botClient, chatIdMsg, userState, cancellationToken);
+                return;
+            }
+
+            if (messageText is "✏️ Редактировать профиль" or "✏️ Profilni tahrirlash" or "✏️ Edit Profile" or "✏️ Profilni o'zgertiw")
+            {
+                userState.Step = RegistrationStep.EditName;
+                string editPrompt = userState.Language switch
+                {
+                    "qr" => "Jańa atıńız ha'm familiyańızdı kiritiń:",
+                    "uz" => "Yangi исм ва фамилиянгизни киритинг:",
+                    "en" => "Enter your new Name and Surname:",
+                    _ => "Введите ваше новое Имя и Фамилию:"
+                };
+                await botClient.SendMessage(chatIdMsg, editPrompt, cancellationToken: cancellationToken);
                 return;
             }
 
@@ -330,10 +489,34 @@ namespace TelegramBot
 
             switch (userState.Step)
             {
+                case RegistrationStep.EditName:
+                    userState.FullName = messageText;
+                    userState.Step = RegistrationStep.EditPhone;
+                    await botClient.SendMessage(chatIdMsg, "Введите ваш новый номер телефона (+998 xx xxx xx xx):", cancellationToken: cancellationToken);
+                    break;
+
+                case RegistrationStep.EditPhone:
+                    if (!Regex.IsMatch(messageText, @"^\+998\s?\d{2}\s?\d{3}\s?\d{2}\s?\d{2}$"))
+                    {
+                        await botClient.SendMessage(chatIdMsg, "❌ Неверный формат! Введите номер strictly +998 xx xxx xx xx:", cancellationToken: cancellationToken);
+                        return;
+                    }
+                    userState.PhoneNumber = messageText;
+                    userState.Step = RegistrationStep.None;
+                    await botClient.SendMessage(chatIdMsg, "✅ Ваши данные успешно обновлены!", cancellationToken: cancellationToken);
+                    await SendMainMenu(botClient, chatIdMsg, userState, cancellationToken);
+                    break;
+
                 case RegistrationStep.AwaitingSecretCode:
                     string inputCode = messageText.Trim().ToUpper();
                     if (TeamsByCode.TryGetValue(inputCode, out var foundTeam))
                     {
+                        if (foundTeam.IsFinalized || foundTeam.Members.Count >= foundTeam.MaxMembers)
+                        {
+                            await botClient.SendMessage(chatIdMsg, "❌ Регистрация в эту команду закрыта или достигнут лимит 5 человек!", cancellationToken: cancellationToken);
+                            userState.Step = RegistrationStep.None;
+                            return;
+                        }
                         userState.PendingTeamId = foundTeam.TeamId;
                         userState.Step = RegistrationStep.None;
                         await SendSubscriptionPrompt(botClient, chatIdMsg, userState, cancellationToken);
@@ -394,6 +577,13 @@ namespace TelegramBot
                     }
                     else if (!string.IsNullOrEmpty(userState.PendingTeamId) && TeamsById.TryGetValue(userState.PendingTeamId, out var targetTeam))
                     {
+                        if (targetTeam.Members.Count >= targetTeam.MaxMembers)
+                        {
+                            await botClient.SendMessage(chatIdMsg, "❌ К сожалению, в этой команде уже максимальное количество участников (5)!", cancellationToken: cancellationToken);
+                            userState.Step = RegistrationStep.None;
+                            return;
+                        }
+
                         userState.TeamId = targetTeam.TeamId;
                         if (!targetTeam.Members.Contains(chatIdMsg))
                         {
@@ -410,7 +600,7 @@ namespace TelegramBot
                         };
                         await botClient.SendMessage(chatIdMsg, joinedMsg, cancellationToken: cancellationToken);
 
-                        string notifyLeader = $"🔔 **Новый участник в вашей команде!**\n\n👤 Имя: {userState.FullName}\n📞 Телефон: {userState.PhoneNumber}";
+                        string notifyLeader = $"🔔 **Новый участник в вашей команде!**\n\n👤 Имя: {userState.FullName}\n📞 Телефон: {userState.PhoneNumber}\n👥 Состав: {targetTeam.Members.Count}/{targetTeam.MaxMembers}";
                         try { await botClient.SendMessage(targetTeam.LeaderChatId, notifyLeader, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken); } catch { }
 
                         if (AdminChatId != 0)
@@ -507,7 +697,6 @@ namespace TelegramBot
 
             if (team.LeaderChatId == chatId)
             {
-                // Если капитан выходит — удаляем команду полностью
                 TeamsById.TryRemove(team.TeamId, out _);
                 TeamsByCode.TryRemove(team.SecretCode, out _);
 
@@ -550,7 +739,6 @@ namespace TelegramBot
             }
             else
             {
-                // Обычный участник выходит
                 team.Members.Remove(chatId);
                 user.TeamId = "";
 
@@ -594,18 +782,34 @@ namespace TelegramBot
 
             string memberList = "";
             int index = 1;
+            List<InlineKeyboardButton[]> inlineButtons = new();
+
             foreach (var memberId in team.Members)
             {
                 if (Users.TryGetValue(memberId, out var memberUser))
                 {
                     string roleMark = memberId == team.LeaderChatId ? " (👑 Капитан)" : "";
                     memberList += $"{index}. {memberUser.FullName} - {memberUser.PhoneNumber}{roleMark}\n";
+                    
+                    if (chatId == team.LeaderChatId && memberId != chatId)
+                    {
+                        inlineButtons.Add(new[] { InlineKeyboardButton.WithCallbackData($"❌ Исключить {memberUser.FullName}", $"kick_{memberId}") });
+                    }
                     index++;
                 }
             }
 
-            string info = $"👥 **Команда:** {team.Name}\n🔐 **Секретный код:** `{team.SecretCode}`\n\n**Участники ({team.Members.Count}):**\n{memberList}\n🔗 **Ссылка для приглашения:**\n`{inviteLink}`";
-            await botClient.SendMessage(chatId, info, parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+            if (chatId == team.LeaderChatId && !team.IsFinalized)
+            {
+                inlineButtons.Add(new[] { InlineKeyboardButton.WithCallbackData("✅ Зафиксировать состав команды", "finalize_team") });
+            }
+
+            string statusStr = team.IsFinalized ? "🔒 Состав зафиксирован (прием закрыт)" : $"🔓 Открыт (макс. {team.MaxMembers} человек)";
+
+            string info = $"👥 **Команда:** {team.Name}\n🔐 **Секретный код:** `{team.SecretCode}`\n📌 **Статус:** {statusStr}\n\n**Участники ({team.Members.Count}/{team.MaxMembers}):**\n{memberList}\n🔗 **Ссылка для приглашения:**\n`{inviteLink}`";
+
+            InlineKeyboardMarkup markup = inlineButtons.Count > 0 ? new InlineKeyboardMarkup(inlineButtons) : null;
+            await botClient.SendMessage(chatId, info, parseMode: ParseMode.Markdown, replyMarkup: markup, cancellationToken: cancellationToken);
         }
 
         private static async Task ExportDataToAdmin(ITelegramBotClient botClient, long adminChatId, CancellationToken cancellationToken)
@@ -680,6 +884,7 @@ namespace TelegramBot
             string joinTeamBtn = user.Language switch { "qr" => "🔗 Kod arqalı qosılıw", "uz" => "🔗 Kod orqali qo'shilish", "en" => "🔗 Join by Code", _ => "🔗 Присоединиться по коду" };
             string myTeamBtn = user.Language switch { "qr" => "👥 Benim komandam", "uz" => "👥 Mening jamoam", "en" => "👥 My Team", _ => "👥 Моя команда" };
             string leaveTeamBtn = user.Language switch { "qr" => "🚪 Komandadan shıg'ıw", "uz" => "🚪 Jamoadan chiqish", "en" => "🚪 Leave Team", _ => "🚪 Выйти из команды" };
+            string editProfileBtn = user.Language switch { "qr" => "✏️ Profilni o'zgertiw", "uz" => "✏️ Profilni tahrirlash", "en" => "✏️ Edit Profile", _ => "✏️ Редактировать профиль" };
             string helpBtn = user.Language switch { "qr" => "Anıqlama", "uz" => "Yordam", "en" => "Help", _ => "Помощь" };
             string socialBtn = user.Language switch { "qr" => "📱 Biz sociallıq tarmaqlarda", "uz" => "📱 Ijtimoiy tarmoqlardamiz", "en" => "📱 Social Networks", _ => "📱 Мы в социальной сети" };
 
@@ -688,14 +893,15 @@ namespace TelegramBot
             if (string.IsNullOrEmpty(user.TeamId))
             {
                 keyboardList.Add(new KeyboardButton[] { createTeamBtn, joinTeamBtn });
-                keyboardList.Add(new KeyboardButton[] { helpBtn, socialBtn });
+                keyboardList.Add(new KeyboardButton[] { editProfileBtn, helpBtn });
             }
             else
             {
                 keyboardList.Add(new KeyboardButton[] { myTeamBtn, leaveTeamBtn });
-                keyboardList.Add(new KeyboardButton[] { helpBtn, socialBtn });
+                keyboardList.Add(new KeyboardButton[] { editProfileBtn, helpBtn });
             }
 
+            keyboardList.Add(new KeyboardButton[] { socialBtn });
             keyboardList.Add(new KeyboardButton[] { "🌐 Выбрать язык / Tilingizni tanlang / Choose language" });
 
             var keyboard = new ReplyKeyboardMarkup(keyboardList) { ResizeKeyboard = true };
